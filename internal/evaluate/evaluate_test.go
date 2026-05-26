@@ -2,12 +2,9 @@ package evaluate
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/skunkworks0x/kineticz/internal/arize"
 )
 
 const origPkg = `package pipeline
@@ -145,7 +142,6 @@ type fakeIndexer struct {
 	mu     sync.Mutex
 	called chan struct{}
 	shas   []string
-	err    error
 }
 
 func newFakeIndexer() *fakeIndexer {
@@ -157,7 +153,7 @@ func (f *fakeIndexer) Index(_ context.Context, sha string, _ []byte) error {
 	f.shas = append(f.shas, sha)
 	f.mu.Unlock()
 	f.called <- struct{}{}
-	return f.err
+	return nil
 }
 
 func (f *fakeIndexer) waitCalls(t *testing.T, n int) {
@@ -171,16 +167,10 @@ func (f *fakeIndexer) waitCalls(t *testing.T, n int) {
 	}
 }
 
-func TestGate_LocalBlockSkipsArize(t *testing.T) {
+func TestGate_LocalBlockEmitsBlockAndIndexes(t *testing.T) {
 	aw := &recordingAudit{}
 	idx := newFakeIndexer()
-	az := &arize.Mock{
-		EvaluateFn: func(context.Context, arize.EvaluateRequest) (*arize.EvaluateResponse, error) {
-			t.Error("arize should not be called when local blocks")
-			return nil, nil
-		},
-	}
-	g := New(az, aw, idx)
+	g := New(aw, idx)
 	res, err := g.Evaluate(context.Background(), []byte(origPkg), []byte(patchedPkgChangedSig), []byte("diff bytes"))
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
@@ -194,70 +184,18 @@ func TestGate_LocalBlockSkipsArize(t *testing.T) {
 	idx.waitCalls(t, 1)
 }
 
-func TestGate_ArizePass(t *testing.T) {
+func TestGate_LocalPassEmitsEvaluatePass(t *testing.T) {
 	aw := &recordingAudit{}
 	idx := newFakeIndexer()
-	az := &arize.Mock{
-		EvaluateFn: func(_ context.Context, req arize.EvaluateRequest) (*arize.EvaluateResponse, error) {
-			return &arize.EvaluateResponse{Pass: true, Rationale: "ok"}, nil
-		},
-	}
-	g := New(az, aw, idx)
-	res, err := g.Evaluate(context.Background(), []byte(origPkg), []byte(patchedPkgAdditive), []byte("diff"))
+	g := New(aw, idx)
+	res, err := g.Evaluate(context.Background(), []byte(origPkg), []byte(patchedPkgAdditive), []byte("good diff"))
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
 	if res.Verdict != VerdictAllow {
 		t.Errorf("Verdict = %v, want VerdictAllow", res.Verdict)
 	}
-	if want := []string{"EVALUATE_ARIZE_PASS"}; !sameSlice(aw.snapshot(), want) {
-		t.Errorf("audits = %v, want %v", aw.snapshot(), want)
-	}
-}
-
-func TestGate_ArizeFail(t *testing.T) {
-	aw := &recordingAudit{}
-	idx := newFakeIndexer()
-	az := &arize.Mock{
-		EvaluateFn: func(context.Context, arize.EvaluateRequest) (*arize.EvaluateResponse, error) {
-			resp := &arize.EvaluateResponse{Pass: false, Rationale: "signature unstable"}
-			return resp, errors.New("wrapped: " + arize.ErrRubricFailed.Error())
-		},
-	}
-	// Real arize client returns a wrapped ErrRubricFailed; emulate with a
-	// fmt.Errorf-equivalent so errors.Is works.
-	az.EvaluateFn = func(context.Context, arize.EvaluateRequest) (*arize.EvaluateResponse, error) {
-		resp := &arize.EvaluateResponse{Pass: false, Rationale: "signature unstable"}
-		return resp, errWrap(arize.ErrRubricFailed, "signature unstable")
-	}
-	g := New(az, aw, idx)
-	res, err := g.Evaluate(context.Background(), []byte(origPkg), []byte(patchedPkgAdditive), []byte("diff"))
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if res.Verdict != VerdictBlock {
-		t.Errorf("Verdict = %v, want VerdictBlock", res.Verdict)
-	}
-	if want := []string{"EVALUATE_ARIZE_FAIL"}; !sameSlice(aw.snapshot(), want) {
-		t.Errorf("audits = %v, want %v", aw.snapshot(), want)
-	}
-	idx.waitCalls(t, 1)
-}
-
-func TestGate_ArizeUnavailable(t *testing.T) {
-	aw := &recordingAudit{}
-	idx := newFakeIndexer()
-	az := &arize.Mock{
-		EvaluateFn: func(context.Context, arize.EvaluateRequest) (*arize.EvaluateResponse, error) {
-			return nil, errWrap(arize.ErrArizeUnavailable, "5xx exhausted")
-		},
-	}
-	g := New(az, aw, idx)
-	_, err := g.Evaluate(context.Background(), []byte(origPkg), []byte(patchedPkgAdditive), []byte("diff"))
-	if !errors.Is(err, arize.ErrArizeUnavailable) {
-		t.Fatalf("err = %v, want ErrArizeUnavailable", err)
-	}
-	if want := []string{"EVALUATE_ARIZE_UNAVAILABLE"}; !sameSlice(aw.snapshot(), want) {
+	if want := []string{"EVALUATE_PASS"}; !sameSlice(aw.snapshot(), want) {
 		t.Errorf("audits = %v, want %v", aw.snapshot(), want)
 	}
 }
@@ -265,13 +203,7 @@ func TestGate_ArizeUnavailable(t *testing.T) {
 func TestGate_DedupSuppressesRepeats(t *testing.T) {
 	aw := &recordingAudit{}
 	idx := newFakeIndexer()
-	az := &arize.Mock{
-		EvaluateFn: func(context.Context, arize.EvaluateRequest) (*arize.EvaluateResponse, error) {
-			t.Error("arize should not be called on dedup hit")
-			return nil, nil
-		},
-	}
-	g := New(az, aw, idx)
+	g := New(aw, idx)
 	diff := []byte("the same diff bytes")
 
 	// First call: local-block path
@@ -316,17 +248,3 @@ func sameSlice(a, b []string) bool {
 	}
 	return true
 }
-
-// errWrap mimics fmt.Errorf("%w: %s", sentinel, msg) without pulling in fmt
-// into the test signature.
-func errWrap(sentinel error, msg string) error {
-	return &wrappedErr{sentinel: sentinel, msg: msg}
-}
-
-type wrappedErr struct {
-	sentinel error
-	msg      string
-}
-
-func (w *wrappedErr) Error() string { return w.sentinel.Error() + ": " + w.msg }
-func (w *wrappedErr) Unwrap() error { return w.sentinel }

@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"sync"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 
 	"github.com/skunkworks0x/kineticz/internal/arize"
 	"github.com/skunkworks0x/kineticz/internal/audit"
@@ -14,45 +16,49 @@ import (
 
 // RejectedIndexer indexes rejected diffs into Elastic so future retrieval
 // can surface "we've seen this before, don't try it again" context. Failure
-// is logged but doesn't propagate — degraded mode for the evaluate path.
+// is logged but doesn't propagate.
 type RejectedIndexer interface {
 	Index(ctx context.Context, sha string, diff []byte) error
 }
 
-// Result describes which path Evaluate took and the outcome.
+// Result describes the outcome of Evaluate.
 type Result struct {
-	Verdict       Verdict
-	LocalReason   string
-	ArizeResponse *arize.EvaluateResponse
-	DiffSHA       string
-	Deduplicated  bool
+	Verdict      Verdict
+	LocalReason  string
+	DiffSHA      string
+	Deduplicated bool
 }
 
-// Gate orchestrates the two-layer evaluation: local pre-filter, then Arize.
-// Rejected diffs are deduped within this Gate's lifetime; repeat submissions
-// of the same SHA short-circuit to a cached BLOCK without re-running checks
-// or re-indexing.
+// Gate runs the deterministic local pre-filter. The Arize boolean rubric is
+// now implemented by these local checks (parses-as-Go + preserves-exported-
+// signatures); Arize Phoenix observes the decision via OpenTelemetry spans
+// rather than scoring it via a REST endpoint. Rejected diffs are deduped
+// within this Gate's lifetime.
 type Gate struct {
-	arize   arize.Client
 	audit   audit.Writer
 	indexer RejectedIndexer
 	dedup   sync.Map // sha256 hex -> struct{}
 }
 
-// New wires a Gate. arize is the boolean rubric service; aw writes audit
-// entries to the MongoDB ledger; indexer indexes rejected diffs into Elastic.
-func New(a arize.Client, aw audit.Writer, ri RejectedIndexer) *Gate {
-	return &Gate{arize: a, audit: aw, indexer: ri}
+// New wires a Gate. aw writes audit entries to the MongoDB ledger; indexer
+// indexes rejected diffs into Elastic.
+func New(aw audit.Writer, ri RejectedIndexer) *Gate {
+	return &Gate{audit: aw, indexer: ri}
 }
 
-// Evaluate runs the pipeline: dedup → local pre-filter → Arize gate.
+// Evaluate runs the pipeline: dedup → local pre-filter → audit + trace.
 // Audit writes always precede the async Elastic indexing to satisfy the
-// "MongoDB before Elastic" invariant.
+// "MongoDB before Elastic" invariant. A span is emitted for Phoenix.
 func (g *Gate) Evaluate(ctx context.Context, orig, patched, diff []byte) (*Result, error) {
 	sha := diffSHA(diff)
 	res := &Result{DiffSHA: sha}
 
+	ctx, span := arize.Tracer().Start(ctx, "evaluate")
+	span.SetAttributes(attribute.String("diff.sha256", sha))
+	defer span.End()
+
 	if _, dup := g.dedup.Load(sha); dup {
+		span.SetAttributes(attribute.Bool("evaluate.deduplicated", true))
 		res.Verdict = VerdictBlock
 		res.Deduplicated = true
 		return res, nil
@@ -60,14 +66,13 @@ func (g *Gate) Evaluate(ctx context.Context, orig, patched, diff []byte) (*Resul
 
 	local := RunLocal(orig, patched)
 	if local.Verdict == VerdictBlock {
-		// LoadOrStore is atomic: if a concurrent Evaluate raced past the
-		// Load above and got here first, only one of us actually inserts
-		// into the dedup map and writes the audit + index.
 		if _, loaded := g.dedup.LoadOrStore(sha, struct{}{}); loaded {
 			res.Verdict = VerdictBlock
 			res.Deduplicated = true
 			return res, nil
 		}
+		span.SetStatus(codes.Error, local.Reason)
+		span.SetAttributes(attribute.String("evaluate.verdict", "BLOCK"), attribute.String("evaluate.reason", local.Reason))
 		_ = g.audit.Append(ctx, "EVALUATE_LOCAL_BLOCK", payloadJSON(map[string]any{
 			"sha":    sha,
 			"reason": local.Reason,
@@ -78,41 +83,9 @@ func (g *Gate) Evaluate(ctx context.Context, orig, patched, diff []byte) (*Resul
 		return res, nil
 	}
 
-	arizeResp, err := g.arize.Evaluate(ctx, arize.EvaluateRequest{
-		Diff:    diff,
-		Context: map[string]any{"diff_sha": sha},
-	})
-	if err != nil {
-		if errors.Is(err, arize.ErrRubricFailed) {
-			if _, loaded := g.dedup.LoadOrStore(sha, struct{}{}); loaded {
-				res.Verdict = VerdictBlock
-				res.Deduplicated = true
-				return res, nil
-			}
-			_ = g.audit.Append(ctx, "EVALUATE_ARIZE_FAIL", payloadJSON(map[string]any{
-				"sha":       sha,
-				"rationale": arizeResp.Rationale,
-			}))
-			go g.indexRejected(ctx, sha, diff)
-			res.Verdict = VerdictBlock
-			res.ArizeResponse = arizeResp
-			return res, nil
-		}
-		// Service unavailable or other transport error.
-		_ = g.audit.Append(ctx, "EVALUATE_ARIZE_UNAVAILABLE", payloadJSON(map[string]any{
-			"sha":   sha,
-			"error": err.Error(),
-		}))
-		res.Verdict = VerdictBlock
-		return res, err
-	}
-
-	_ = g.audit.Append(ctx, "EVALUATE_ARIZE_PASS", payloadJSON(map[string]any{
-		"sha":       sha,
-		"rationale": arizeResp.Rationale,
-	}))
+	span.SetAttributes(attribute.String("evaluate.verdict", "PASS"))
+	_ = g.audit.Append(ctx, "EVALUATE_PASS", payloadJSON(map[string]any{"sha": sha}))
 	res.Verdict = VerdictAllow
-	res.ArizeResponse = arizeResp
 	return res, nil
 }
 
@@ -122,8 +95,6 @@ func (g *Gate) Evaluate(ctx context.Context, orig, patched, diff []byte) (*Resul
 func (g *Gate) indexRejected(parent context.Context, sha string, diff []byte) {
 	ctx := context.WithoutCancel(parent)
 	if err := g.indexer.Index(ctx, sha, diff); err != nil {
-		// Best-effort: log nothing for now. A production logger would attach
-		// the correlation token and report the failure for ops follow-up.
 		_ = err
 	}
 }
