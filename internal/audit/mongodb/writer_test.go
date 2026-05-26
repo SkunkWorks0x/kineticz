@@ -6,6 +6,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/skunkworks0x/kineticz/internal/audit"
 	"github.com/skunkworks0x/kineticz/internal/corr"
@@ -219,6 +220,34 @@ func TestAppendWithEventAndHasEntry(t *testing.T) {
 	// The stored entry should carry SourceEventID.
 	if got := fs.entries[0].SourceEventID; got != eventID {
 		t.Errorf("entry.SourceEventID = %q, want %q", got, eventID)
+	}
+}
+
+func TestAppend_TimestampMillisecondRoundtrip(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	fs := &fakeStore{}
+	w := NewWriter(fs, priv)
+	ctx := corr.WithToken(context.Background(), "tok-roundtrip")
+	if err := w.Append(ctx, "TEST", []byte("payload")); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if len(fs.entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(fs.entries))
+	}
+	e := fs.entries[0]
+	// Simulate BSON roundtrip: BSON DateTime is millisecond precision.
+	// Truncating again should be a no-op when the entry was produced by Append.
+	rounded := e.Timestamp.Truncate(time.Millisecond)
+	if !rounded.Equal(e.Timestamp) {
+		t.Fatalf("Timestamp not at millisecond precision: %v (nanos=%d)", e.Timestamp, e.Timestamp.Nanosecond())
+	}
+	// Mutate-and-recompute on the BSON-equivalent value: hash must match.
+	e.Timestamp = rounded
+	if err := audit.Verify(*e, nil, pub); err != nil {
+		t.Fatalf("Verify after millisecond truncation: %v", err)
 	}
 }
 

@@ -105,6 +105,11 @@ func (w *Writer) appendInternal(ctx context.Context, action string, payload []by
 		}
 
 		token, _ := corr.FromContext(txCtx)
+		// Truncate to millisecond before hashing. BSON DateTime stores
+		// millisecond precision; without truncation here, an entry read back
+		// from MongoDB would re-hash to a different value than its stored
+		// Hash, and Verify would return ErrHashMismatch.
+		now := time.Now().UTC().Truncate(time.Millisecond)
 		e := &audit.Entry{
 			ID:               newEntryID(),
 			CorrelationToken: token,
@@ -112,7 +117,7 @@ func (w *Writer) appendInternal(ctx context.Context, action string, payload []by
 			Payload:          payload,
 			Thought:          thought,
 			SourceEventID:    eventID,
-			Timestamp:        time.Now().UTC(),
+			Timestamp:        now,
 		}
 		if prev != nil {
 			e.PreviousHash = prev.Hash
