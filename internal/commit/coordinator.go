@@ -7,7 +7,10 @@ import (
 	"fmt"
 
 	"github.com/bluekeyes/go-gitdiff/gitdiff"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 
+	"github.com/skunkworks0x/kineticz/internal/arize"
 	"github.com/skunkworks0x/kineticz/internal/audit"
 	"github.com/skunkworks0x/kineticz/internal/corr"
 	"github.com/skunkworks0x/kineticz/internal/gitlab"
@@ -55,6 +58,14 @@ func (c *Coordinator) ApplyAndOpenMR(ctx context.Context, req Request) (*Result,
 	token, _ := corr.FromContext(ctx)
 	sourceBranch := branchName(token)
 
+	ctx, span := arize.Tracer().Start(ctx, "kineticz.commit")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("kineticz.correlation_token", string(token)),
+		attribute.String("kineticz.file_path", req.FilePath),
+		attribute.String("kineticz.source_branch", sourceBranch),
+	)
+
 	sha, err := c.gl.CreateCommit(ctx, gitlab.CommitRequest{
 		ProjectID:        req.ProjectID,
 		SourceBranch:     sourceBranch,
@@ -65,9 +76,12 @@ func (c *Coordinator) ApplyAndOpenMR(ctx context.Context, req Request) (*Result,
 		CorrelationToken: string(token),
 	})
 	if err != nil {
+		span.SetStatus(codes.Error, "commit: "+err.Error())
+		span.RecordError(err)
 		_ = c.writeAudit(ctx, "COMMIT_FAILED", req.FilePath, err.Error(), 0, "")
 		return nil, fmt.Errorf("commit: create commit: %w", err)
 	}
+	span.SetAttributes(attribute.String("kineticz.commit_sha", sha))
 	_ = c.writeAudit(ctx, "COMMIT_OK", req.FilePath, "", 0, sha)
 
 	mr, err := c.gl.CreateMR(ctx, gitlab.MRRequest{
@@ -79,9 +93,15 @@ func (c *Coordinator) ApplyAndOpenMR(ctx context.Context, req Request) (*Result,
 		CorrelationToken: string(token),
 	})
 	if err != nil {
+		span.SetStatus(codes.Error, "mr: "+err.Error())
+		span.RecordError(err)
 		_ = c.writeAudit(ctx, "MR_FAILED", req.FilePath, err.Error(), 0, sha)
 		return nil, fmt.Errorf("commit: create MR (commit %s already pushed): %w", sha, err)
 	}
+	span.SetAttributes(
+		attribute.String("kineticz.mr_url", mr.MRURL),
+		attribute.Int("kineticz.mr_iid", mr.MRIID),
+	)
 	_ = c.writeAudit(ctx, "MR_CREATED", req.FilePath, "", mr.MRIID, sha)
 
 	return &Result{MRIID: mr.MRIID, MRURL: mr.MRURL, CommitSHA: sha, Branch: sourceBranch}, nil

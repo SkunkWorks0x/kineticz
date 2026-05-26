@@ -9,8 +9,12 @@ import (
 	"strings"
 
 	"github.com/bluekeyes/go-gitdiff/gitdiff"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 
+	"github.com/skunkworks0x/kineticz/internal/arize"
 	"github.com/skunkworks0x/kineticz/internal/audit"
+	"github.com/skunkworks0x/kineticz/internal/corr"
 	"github.com/skunkworks0x/kineticz/internal/engine/diagnose"
 	"github.com/skunkworks0x/kineticz/internal/gemini"
 )
@@ -70,76 +74,129 @@ func (c *Coordinator) Repair(ctx context.Context, diag *diagnose.DiagnosisResult
 		return nil, fmt.Errorf("repair: invalid DiagnosisResult: %w", err)
 	}
 
+	ctx, span := arize.Tracer().Start(ctx, "kineticz.repair")
+	defer span.End()
+	if tok, ok := corr.FromContext(ctx); ok {
+		span.SetAttributes(attribute.String("kineticz.correlation_token", string(tok)))
+	}
+
 	feedback := ""
 	emptyCount := 0
 	var lastThought string
 
-	for iter := 0; iter < c.MaxIterations; iter++ {
-		target, err := c.target.Read(ctx, targetPath)
-		if err != nil {
-			c.writeAudit(ctx, "REPAIR_REJECTED", iter, "target_read_error", err.Error(), "")
-			return nil, fmt.Errorf("repair: read target: %w", err)
-		}
-
-		c.writeAudit(ctx, "REPAIR_ATTEMPT", iter, "", "", "")
-
-		prompt := buildPrompt(diag, target, feedback)
-		resp, err := c.gemini.Generate(ctx, gemini.GenerateRequest{
-			SystemInstruction: systemInstruction,
-			UserPrompt:        prompt,
-			Temperature:       0.2,
-			MaxOutputTokens:   4096,
-		})
-		if err != nil {
-			c.writeAudit(ctx, "REPAIR_REJECTED", iter, "gemini_error", err.Error(), "")
-			emptyCount++
-			if emptyCount >= 2 {
-				return nil, fmt.Errorf("%w: %v", ErrTwoConsecutiveEmpty, err)
-			}
-			feedback = "previous gemini call failed: " + err.Error()
-			continue
-		}
-
-		thought := gemini.ExtractThought(resp)
-		lastThought = thought
-		diffBytes := []byte(extractDiffFromResponse(resp))
-
-		files, _, parseErr := gitdiff.Parse(bytes.NewReader(diffBytes))
-		if parseErr != nil {
-			c.writeAudit(ctx, "REPAIR_REJECTED", iter, "parse_error", parseErr.Error(), thought)
-			emptyCount++
-			if emptyCount >= 2 {
-				return nil, fmt.Errorf("%w: %v", ErrTwoConsecutiveEmpty, parseErr)
-			}
-			feedback = "previous diff failed to parse: " + parseErr.Error()
-			continue
-		}
-
-		if len(files) == 0 {
-			c.writeAudit(ctx, "REPAIR_REJECTED", iter, "no_hunks", "", thought)
-			emptyCount++
-			if emptyCount >= 2 {
-				return nil, ErrTwoConsecutiveEmpty
-			}
-			feedback = "previous response contained no diff hunks"
-			continue
-		}
-
-		emptyCount = 0
-		reason := validateDiff(files)
-		if reason == "" {
-			c.writeAudit(ctx, "REPAIR_APPROVED", iter, "", "", thought)
-			return &Result{
-				PatchDiff:  diffBytes,
-				Iterations: iter + 1,
-				Thought:    thought,
-			}, nil
-		}
-
-		c.writeAudit(ctx, "REPAIR_REJECTED", iter, reason, "", thought)
-		feedback = "previous diff rejected: " + reason
+	type iterationOutcome struct {
+		approved bool
+		result   *Result
+		hardErr  error
 	}
 
+	for iter := 0; iter < c.MaxIterations; iter++ {
+		outcome := func() iterationOutcome {
+			iterCtx, iterSpan := arize.Tracer().Start(ctx, "kineticz.repair.iteration")
+			iterSpan.SetAttributes(attribute.Int("kineticz.attempt_number", iter+1))
+			defer iterSpan.End()
+
+			target, err := c.target.Read(iterCtx, targetPath)
+			if err != nil {
+				iterSpan.SetStatus(codes.Error, err.Error())
+				iterSpan.RecordError(err)
+				c.writeAudit(iterCtx, "REPAIR_REJECTED", iter, "target_read_error", err.Error(), "")
+				return iterationOutcome{hardErr: fmt.Errorf("repair: read target: %w", err)}
+			}
+
+			c.writeAudit(iterCtx, "REPAIR_ATTEMPT", iter, "", "", "")
+
+			prompt := buildPrompt(diag, target, feedback)
+			resp, err := c.gemini.Generate(iterCtx, gemini.GenerateRequest{
+				SystemInstruction: systemInstruction,
+				UserPrompt:        prompt,
+				Temperature:       0.2,
+				MaxOutputTokens:   4096,
+			})
+			if err != nil {
+				iterSpan.SetStatus(codes.Error, "gemini: "+err.Error())
+				iterSpan.RecordError(err)
+				c.writeAudit(iterCtx, "REPAIR_REJECTED", iter, "gemini_error", err.Error(), "")
+				emptyCount++
+				if emptyCount >= 2 {
+					return iterationOutcome{hardErr: fmt.Errorf("%w: %v", ErrTwoConsecutiveEmpty, err)}
+				}
+				feedback = "previous gemini call failed: " + err.Error()
+				return iterationOutcome{}
+			}
+
+			thought := gemini.ExtractThought(resp)
+			lastThought = thought
+			diffBytes := []byte(extractDiffFromResponse(resp))
+
+			files, _, parseErr := gitdiff.Parse(bytes.NewReader(diffBytes))
+			if parseErr != nil {
+				iterSpan.SetStatus(codes.Error, "parse: "+parseErr.Error())
+				iterSpan.RecordError(parseErr)
+				c.writeAudit(iterCtx, "REPAIR_REJECTED", iter, "parse_error", parseErr.Error(), thought)
+				emptyCount++
+				if emptyCount >= 2 {
+					return iterationOutcome{hardErr: fmt.Errorf("%w: %v", ErrTwoConsecutiveEmpty, parseErr)}
+				}
+				feedback = "previous diff failed to parse: " + parseErr.Error()
+				return iterationOutcome{}
+			}
+
+			if len(files) == 0 {
+				iterSpan.SetAttributes(attribute.String("kineticz.iteration_verdict", "no_hunks"))
+				c.writeAudit(iterCtx, "REPAIR_REJECTED", iter, "no_hunks", "", thought)
+				emptyCount++
+				if emptyCount >= 2 {
+					return iterationOutcome{hardErr: ErrTwoConsecutiveEmpty}
+				}
+				feedback = "previous response contained no diff hunks"
+				return iterationOutcome{}
+			}
+
+			emptyCount = 0
+			reason := validateDiff(files)
+			if reason == "" {
+				iterSpan.SetAttributes(attribute.String("kineticz.iteration_verdict", "APPROVED"))
+				c.writeAudit(iterCtx, "REPAIR_APPROVED", iter, "", "", thought)
+				return iterationOutcome{
+					approved: true,
+					result: &Result{
+						PatchDiff:  diffBytes,
+						Iterations: iter + 1,
+						Thought:    thought,
+					},
+				}
+			}
+
+			iterSpan.SetAttributes(attribute.String("kineticz.iteration_verdict", reason))
+			c.writeAudit(iterCtx, "REPAIR_REJECTED", iter, reason, "", thought)
+			feedback = "previous diff rejected: " + reason
+			return iterationOutcome{}
+		}()
+
+		if outcome.hardErr != nil {
+			span.SetStatus(codes.Error, outcome.hardErr.Error())
+			span.RecordError(outcome.hardErr)
+			span.SetAttributes(
+				attribute.Int("kineticz.iteration_count", iter+1),
+				attribute.String("kineticz.final_verdict", "HARD_FAIL"),
+			)
+			return nil, outcome.hardErr
+		}
+		if outcome.approved {
+			span.SetAttributes(
+				attribute.Int("kineticz.iteration_count", iter+1),
+				attribute.String("kineticz.final_verdict", "APPROVED"),
+			)
+			return outcome.result, nil
+		}
+	}
+
+	span.SetStatus(codes.Error, ErrMaxIterationsExceeded.Error())
+	span.SetAttributes(
+		attribute.Int("kineticz.iteration_count", c.MaxIterations),
+		attribute.String("kineticz.final_verdict", "MAX_ITERATIONS"),
+	)
 	c.writeAudit(ctx, "REPAIR_REJECTED", c.MaxIterations-1, "max_iterations", "", lastThought)
 	return nil, ErrMaxIterationsExceeded
 }
