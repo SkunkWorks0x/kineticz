@@ -356,6 +356,13 @@ func buildDeps(ctx context.Context, cfg config) (Deps, func(), error) {
 		return Deps{}, cleanup, fmt.Errorf("audit writer: %w", err)
 	}
 
+	// Verify the chain head against the seed-derived public key. A mismatch
+	// here means either the seed changed or the ledger was tampered with;
+	// either way, refusing to start is the correct response.
+	if _, err := writer.LoadHead(ctx, pub); err != nil && !errors.Is(err, auditmongo.ErrEmpty) {
+		return Deps{}, cleanup, fmt.Errorf("audit chain head verification failed: %w", err)
+	}
+
 	httpDefault := http.DefaultClient
 	elasticClient := elastic.NewClient(httpDefault, writer, cfg.ElasticURL)
 	dynatraceClient := dynatrace.NewClient(httpDefault, writer, cfg.DynatraceURL)
