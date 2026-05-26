@@ -27,6 +27,7 @@ type chainStore interface {
 	Latest(ctx context.Context) (*audit.Entry, error)
 	Insert(ctx context.Context, e *audit.Entry) error
 	InTransaction(ctx context.Context, fn func(ctx context.Context, s chainStore) error) error
+	HasEntry(ctx context.Context, eventID string) (bool, error)
 }
 
 // Writer is a concrete audit.Writer backed by a transactional chain store.
@@ -63,11 +64,11 @@ func (w *Writer) LoadHead(ctx context.Context, pub ed25519.PublicKey) (*audit.En
 	return head, nil
 }
 
-// Append implements audit.Writer. Delegates to AppendWithThought with an
-// empty thought; non-AI callers (elastic, dynatrace, diagnose engine) use
-// this overload.
+// Append implements audit.Writer. Delegates to appendInternal with empty
+// thought and eventID; non-AI callers (elastic, dynatrace, diagnose engine)
+// use this overload.
 func (w *Writer) Append(ctx context.Context, action string, payload []byte) error {
-	return w.AppendWithThought(ctx, action, payload, "")
+	return w.appendInternal(ctx, action, payload, "", "")
 }
 
 // AppendWithThought implements audit.ThoughtWriter. It opens a transaction,
@@ -76,6 +77,24 @@ func (w *Writer) Append(ctx context.Context, action string, payload []byte) erro
 // Appends within the same process are serialized by mu; concurrent Appends
 // across processes are ordered by the store's transaction.
 func (w *Writer) AppendWithThought(ctx context.Context, action string, payload []byte, thought string) error {
+	return w.appendInternal(ctx, action, payload, thought, "")
+}
+
+// AppendWithEvent writes an audit entry tagged with a source event ID for
+// later HasEntry lookup. Used by webhook receivers (e.g., fivetran) that
+// need idempotency keyed on the upstream event.
+func (w *Writer) AppendWithEvent(ctx context.Context, action string, payload []byte, eventID string) error {
+	return w.appendInternal(ctx, action, payload, "", eventID)
+}
+
+// HasEntry reports whether the ledger already contains an entry with the
+// given source event ID. Used for idempotency checks before processing a
+// webhook delivery.
+func (w *Writer) HasEntry(ctx context.Context, eventID string) (bool, error) {
+	return w.store.HasEntry(ctx, eventID)
+}
+
+func (w *Writer) appendInternal(ctx context.Context, action string, payload []byte, thought, eventID string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -92,6 +111,7 @@ func (w *Writer) AppendWithThought(ctx context.Context, action string, payload [
 			Action:           action,
 			Payload:          payload,
 			Thought:          thought,
+			SourceEventID:    eventID,
 			Timestamp:        time.Now().UTC(),
 		}
 		if prev != nil {

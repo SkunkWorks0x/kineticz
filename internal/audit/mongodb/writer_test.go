@@ -46,6 +46,18 @@ func (s *fakeStore) InTransaction(ctx context.Context, fn func(ctx context.Conte
 	return fn(ctx, s)
 }
 
+func (s *fakeStore) HasEntry(_ context.Context, eventID string) (bool, error) {
+	if eventID == "" {
+		return false, nil
+	}
+	for _, e := range s.entries {
+		if e.SourceEventID == eventID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func TestWriterAppend(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -164,6 +176,49 @@ func TestWriterConcurrentAppendsAreSerialized(t *testing.T) {
 			t.Errorf("entry %d chain broken: prev=%x got %x", i, prev, e.PreviousHash)
 		}
 		prev = e.Hash
+	}
+}
+
+func TestAppendWithEventAndHasEntry(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	fs := &fakeStore{}
+	w := NewWriter(fs, priv)
+	ctx := corr.WithToken(context.Background(), "tok-event")
+
+	const eventID = "sync_abc123"
+
+	found, err := w.HasEntry(ctx, eventID)
+	if err != nil || found {
+		t.Fatalf("HasEntry before append: found=%v err=%v", found, err)
+	}
+
+	if err := w.AppendWithEvent(ctx, "FIVETRAN_RECEIVED", []byte(`{"a":1}`), eventID); err != nil {
+		t.Fatalf("AppendWithEvent: %v", err)
+	}
+
+	found, err = w.HasEntry(ctx, eventID)
+	if err != nil || !found {
+		t.Fatalf("HasEntry after append: found=%v err=%v", found, err)
+	}
+
+	// Different event ID should not match.
+	found, _ = w.HasEntry(ctx, "different")
+	if found {
+		t.Error("HasEntry for unrelated ID should be false")
+	}
+
+	// Empty event ID always returns false (defensive).
+	found, _ = w.HasEntry(ctx, "")
+	if found {
+		t.Error("HasEntry with empty ID should be false")
+	}
+
+	// The stored entry should carry SourceEventID.
+	if got := fs.entries[0].SourceEventID; got != eventID {
+		t.Errorf("entry.SourceEventID = %q, want %q", got, eventID)
 	}
 }
 

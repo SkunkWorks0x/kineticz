@@ -24,6 +24,7 @@ func NewMongoWriter(ctx context.Context, client *mongo.Client, dbName string, pr
 	if _, err := coll.Indexes().CreateMany(ctx, []mongo.IndexModel{
 		{Keys: bson.D{{Key: "correlation_token", Value: 1}}},
 		{Keys: bson.D{{Key: "timestamp", Value: -1}}},
+		{Keys: bson.D{{Key: "source_event_id", Value: 1}}},
 	}); err != nil {
 		return nil, fmt.Errorf("audit/mongodb: create indexes: %w", err)
 	}
@@ -41,6 +42,7 @@ type entryDoc struct {
 	Action           string    `bson:"action"`
 	Payload          []byte    `bson:"payload"`
 	Thought          string    `bson:"thought"`
+	SourceEventID    string    `bson:"source_event_id,omitempty"`
 	PreviousHash     []byte    `bson:"previous_hash"`
 	Hash             []byte    `bson:"hash"`
 	Ed25519Signature []byte    `bson:"ed25519_signature"`
@@ -54,6 +56,7 @@ func (d *entryDoc) toEntry() *audit.Entry {
 		Action:           d.Action,
 		Payload:          d.Payload,
 		Thought:          d.Thought,
+		SourceEventID:    d.SourceEventID,
 		PreviousHash:     d.PreviousHash,
 		Hash:             d.Hash,
 		Ed25519Signature: d.Ed25519Signature,
@@ -68,6 +71,7 @@ func entryToDoc(e *audit.Entry) entryDoc {
 		Action:           e.Action,
 		Payload:          e.Payload,
 		Thought:          e.Thought,
+		SourceEventID:    e.SourceEventID,
 		PreviousHash:     e.PreviousHash,
 		Hash:             e.Hash,
 		Ed25519Signature: e.Ed25519Signature,
@@ -93,6 +97,20 @@ func (m *mongoStore) Insert(ctx context.Context, e *audit.Entry) error {
 		return fmt.Errorf("audit/mongodb: insert: %w", err)
 	}
 	return nil
+}
+
+func (m *mongoStore) HasEntry(ctx context.Context, eventID string) (bool, error) {
+	if eventID == "" {
+		return false, nil
+	}
+	err := m.coll.FindOne(ctx, bson.D{{Key: "source_event_id", Value: eventID}}).Err()
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("audit/mongodb: HasEntry lookup: %w", err)
+	}
+	return true, nil
 }
 
 func (m *mongoStore) InTransaction(ctx context.Context, fn func(ctx context.Context, s chainStore) error) error {

@@ -19,6 +19,10 @@ type Entry struct {
 	Action           string
 	Payload          []byte
 	Thought          string
+	// SourceEventID is metadata for idempotency lookups (e.g., Fivetran event
+	// IDs). EXCLUDED from CanonicalBytes so adding it does not invalidate
+	// stored hashes. Tamper-evident event IDs should live inside Payload.
+	SourceEventID    string
 	PreviousHash     []byte
 	Hash             []byte
 	Ed25519Signature []byte
