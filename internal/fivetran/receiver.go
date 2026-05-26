@@ -15,6 +15,9 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/skunkworks0x/kineticz/internal/arize"
 	"github.com/skunkworks0x/kineticz/internal/audit"
 	"github.com/skunkworks0x/kineticz/internal/corr"
 )
@@ -91,6 +94,15 @@ func (r *Receiver) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	ctx := corr.WithToken(req.Context(), token)
 	payload, _ := json.Marshal(anomaly)
 	eventID := anomaly.EventID()
+
+	ctx, span := arize.Tracer().Start(ctx, "fivetran.receive")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("kineticz.event_type", anomaly.Event),
+		attribute.String("kineticz.connector_id", anomaly.ConnectorID),
+		attribute.String("kineticz.sync_id", anomaly.SyncID),
+		attribute.String("kineticz.correlation_token", string(token)),
+	)
 
 	// Atomic idempotency: the unique partial index on source_event_id makes
 	// concurrent deliveries with the same event ID race in the database.

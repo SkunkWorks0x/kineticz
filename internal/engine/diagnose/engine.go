@@ -7,6 +7,10 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+
+	"github.com/skunkworks0x/kineticz/internal/arize"
 	"github.com/skunkworks0x/kineticz/internal/audit"
 	"github.com/skunkworks0x/kineticz/internal/corr"
 	"github.com/skunkworks0x/kineticz/internal/dynatrace"
@@ -92,16 +96,35 @@ type dtResult struct {
 func (e *Engine) Diagnose(ctx context.Context, q elastic.ContractQuery, syncStartMs, syncEndMs int64) (*DiagnosisResult, error) {
 	token, _ := corr.FromContext(ctx)
 
+	ctx, span := arize.Tracer().Start(ctx, "kineticz.diagnose")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("kineticz.contract_name", q.ContractName),
+		attribute.String("kineticz.correlation_token", string(token)),
+	)
+
 	timeoutCtx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
 
 	results := make(chan any, 2)
 	go func() {
-		cc, err := e.elastic.LookupContract(timeoutCtx, q)
+		cctx, cspan := arize.Tracer().Start(timeoutCtx, "elastic.lookup_contract")
+		defer cspan.End()
+		cc, err := e.elastic.LookupContract(cctx, q)
+		if err != nil {
+			cspan.SetStatus(codes.Error, err.Error())
+			cspan.RecordError(err)
+		}
 		results <- esResult{cc: cc, err: err}
 	}()
 	go func() {
-		ch, err := e.dynatrace.QueryConsumerHealth(timeoutCtx, syncStartMs, syncEndMs)
+		cctx, cspan := arize.Tracer().Start(timeoutCtx, "dynatrace.query_consumer_health")
+		defer cspan.End()
+		ch, err := e.dynatrace.QueryConsumerHealth(cctx, syncStartMs, syncEndMs)
+		if err != nil {
+			cspan.SetStatus(codes.Error, err.Error())
+			cspan.RecordError(err)
+		}
 		results <- dtResult{ch: ch, err: err}
 	}()
 
@@ -117,12 +140,16 @@ func (e *Engine) Diagnose(ctx context.Context, q elastic.ContractQuery, syncStar
 				dt = v
 			}
 		case <-timeoutCtx.Done():
+			span.SetStatus(codes.Error, "timeout: "+timeoutCtx.Err().Error())
+			span.RecordError(timeoutCtx.Err())
 			_ = e.recordAudit(ctx, "DIAGNOSIS_FAILED", token, "timeout", timeoutCtx.Err().Error())
 			return nil, timeoutCtx.Err()
 		}
 	}
 
 	if es.err != nil {
+		span.SetStatus(codes.Error, "elastic: "+es.err.Error())
+		span.RecordError(es.err)
 		_ = e.recordAudit(ctx, "DIAGNOSIS_FAILED", token, "elastic", es.err.Error())
 		return nil, fmt.Errorf("diagnose: elastic lookup: %w", es.err)
 	}
@@ -135,14 +162,18 @@ func (e *Engine) Diagnose(ctx context.Context, q elastic.ContractQuery, syncStar
 	if dt.err != nil {
 		if errors.Is(dt.err, dynatrace.ErrTelemetryUnavailable) {
 			out.Degraded = true
+			span.SetAttributes(attribute.Bool("kineticz.degraded", true))
 			_ = e.recordAudit(ctx, "DIAGNOSIS_DEGRADED", token, "dynatrace", dt.err.Error())
 			return out, nil
 		}
+		span.SetStatus(codes.Error, "dynatrace: "+dt.err.Error())
+		span.RecordError(dt.err)
 		_ = e.recordAudit(ctx, "DIAGNOSIS_FAILED", token, "dynatrace", dt.err.Error())
 		return nil, fmt.Errorf("diagnose: dynatrace query: %w", dt.err)
 	}
 
 	out.ConsumerHealth = dt.ch
+	span.SetAttributes(attribute.Bool("kineticz.degraded", false))
 	_ = e.recordAudit(ctx, "DIAGNOSIS_OK", token, "", "")
 	return out, nil
 }
