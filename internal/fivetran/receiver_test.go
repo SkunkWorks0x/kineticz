@@ -213,6 +213,19 @@ func TestReceiver_PanicInPipelineIsRecoveredAndAudited(t *testing.T) {
 	}
 }
 
+func TestReceiver_OversizeBodyReturns400(t *testing.T) {
+	store := &fakeStore{}
+	r := NewReceiver(store, secret, func(context.Context, Anomaly) {})
+	huge := bytes.Repeat([]byte("a"), MaxBodyBytes+1)
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/fivetran", bytes.NewReader(huge))
+	req.Header.Set(SignatureHeader, signBody(huge))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 on oversize", rec.Code)
+	}
+}
+
 func TestReceiver_AcceptedResponseIncludesCorrelationToken(t *testing.T) {
 	store := &fakeStore{}
 	r := NewReceiver(store, secret, func(context.Context, Anomaly) {})

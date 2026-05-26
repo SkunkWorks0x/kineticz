@@ -18,10 +18,17 @@ import (
 	"github.com/skunkworks0x/kineticz/internal/corr"
 )
 
-// SignatureHeader is the HTTP header carrying the HMAC-SHA256 hex digest of
-// the raw request body. Fivetran's actual header name may differ; verify
-// against the partner's webhook docs before production.
-const SignatureHeader = "X-Fivetran-Signature"
+// SignatureHeader carries the HMAC-SHA256 hex digest of the raw request body.
+// `[unverified]` against the official Fivetran webhook docs as of this commit;
+// the constant was chosen to mirror the industry-standard sha256 suffix used
+// by GitHub and others. Confirm at https://fivetran.com/docs/ before final
+// submission and rename if Fivetran uses a different value.
+const SignatureHeader = "X-Fivetran-Signature-256"
+
+// MaxBodyBytes caps inbound webhook payload size to prevent OOM via a flood
+// of large requests. 1 MiB exceeds typical schema-change payloads with
+// headroom; raise if real Fivetran payloads exceed this.
+const MaxBodyBytes = 1 << 20
 
 // PipelineTimeout caps total wall-clock time for the orchestration goroutine.
 // The goroutine runs with a context detached from the request, so this is
@@ -59,7 +66,7 @@ func NewReceiver(store EventStore, secret string, pipeline PipelineFunc) *Receiv
 //	401 Unauthorized — HMAC mismatch
 //	500 Internal — audit write or store lookup failure
 func (r *Receiver) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	body, err := io.ReadAll(req.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, req.Body, MaxBodyBytes))
 	if err != nil {
 		http.Error(w, "read body failed", http.StatusBadRequest)
 		return

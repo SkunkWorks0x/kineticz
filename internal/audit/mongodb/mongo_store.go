@@ -113,7 +113,14 @@ func (m *mongoStore) HasEntry(ctx context.Context, eventID string) (bool, error)
 	if eventID == "" {
 		return false, nil
 	}
-	err := m.coll.FindOne(ctx, bson.D{{Key: "source_event_id", Value: eventID}}).Err()
+	// Filter on source_event_id AND action so a planted document with the
+	// wrong action cannot trick the idempotency check.
+	filter := bson.D{
+		{Key: "source_event_id", Value: eventID},
+		{Key: "action", Value: "FIVETRAN_RECEIVED"},
+	}
+	opts := options.FindOne().SetProjection(bson.D{{Key: "_id", Value: 1}})
+	err := m.coll.FindOne(ctx, filter, opts).Err()
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return false, nil
 	}
