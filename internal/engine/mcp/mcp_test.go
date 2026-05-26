@@ -8,13 +8,14 @@ import (
 
 func TestOutboundTools(t *testing.T) {
 	tools := OutboundTools()
-	if len(tools) != 2 {
-		t.Fatalf("len(OutboundTools) = %d, want 2", len(tools))
+	if len(tools) != 3 {
+		t.Fatalf("len(OutboundTools) = %d, want 3", len(tools))
 	}
 
 	wantNames := map[string]bool{
 		"elastic_lookup_contract":         false,
 		"dynatrace_query_consumer_health": false,
+		"arize_phoenix_query_traces":      false,
 	}
 	for _, td := range tools {
 		if _, ok := wantNames[td.Name]; !ok {

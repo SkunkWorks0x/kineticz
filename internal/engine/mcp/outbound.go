@@ -1,13 +1,14 @@
 package mcp
 
 // OutboundTools returns the Gemini function-calling tool definitions for the
-// partner services Kineticz integrates with (Elastic, Dynatrace). Gemini 3.5
-// Flash is expected to call these in parallel during the diagnose stage; the
-// tool definitions structure that parallelism (each is independent).
+// partner services Kineticz integrates with. Gemini 3.5 Flash is expected to
+// call Elastic and Dynatrace in parallel during the diagnose stage; Arize
+// Phoenix is queried separately for historical trace context.
 func OutboundTools() []ToolDefinition {
 	return []ToolDefinition{
 		elasticLookupContractTool(),
 		dynatraceQueryConsumerHealthTool(),
+		arizePhoenixQueryTracesTool(),
 	}
 }
 
@@ -34,6 +35,27 @@ func elasticLookupContractTool() ToolDefinition {
 				},
 			},
 			Required: []string{"contract_name", "columns", "diff_embedding"},
+		},
+	}
+}
+
+func arizePhoenixQueryTracesTool() ToolDefinition {
+	return ToolDefinition{
+		Name:        "arize_phoenix_query_traces",
+		Description: "Query Arize Phoenix for spans matching a correlation token or anomaly, returning prior repair attempts, their verdicts, and Gemini reasoning blocks. Backed by the Phoenix MCP server (@arizeai/phoenix-mcp).",
+		Parameters: Schema{
+			Type: "OBJECT",
+			Properties: map[string]Schema{
+				"correlation_token": {
+					Type:        "STRING",
+					Description: "Token threaded through the Kineticz pipeline; matches the span attribute kineticz.correlation_token.",
+				},
+				"lookback_minutes": {
+					Type:        "INTEGER",
+					Description: "How far back to scan trace history.",
+				},
+			},
+			Required: []string{"correlation_token", "lookback_minutes"},
 		},
 	}
 }
