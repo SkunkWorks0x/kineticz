@@ -34,11 +34,14 @@ flowchart LR
 
 ```sh
 git clone https://github.com/skunkworks0x/kineticz && cd kineticz
-cp .env.example .env && $EDITOR .env   # populate the 11 required vars
-go test -race ./...
+cp .env.example .env && $EDITOR .env   # populate all required vars (see file)
+go test -race ./... && go test -race -tags=integration ./...
 docker build -t kineticz .
 docker run --env-file .env -p 8080:8080 kineticz
 ```
+
+The integration test wires all six external partners with mocks and exercises
+the full pipeline end-to-end; it is gated behind the `integration` build tag.
 
 ## How it works
 
@@ -68,7 +71,7 @@ docker run --env-file .env -p 8080:8080 kineticz
 
 ## Audit chain
 
-`internal/audit` defines a length-prefixed canonical encoding so two implementations can compute the same SHA-256 without coordination. `audit.Chain` signs with Ed25519; `audit.Verify` checks linkage, hash, and signature. The MongoDB writer wraps every Append in a transaction so cross-process concurrent writes either chain cleanly or fail. See `internal/audit/audit.go` and `internal/audit/mongodb/` for details.
+`internal/audit` defines a length-prefixed canonical encoding so two implementations can compute the same SHA-256 without coordination. `audit.Chain` signs with Ed25519; `audit.Verify` checks linkage, hash, and signature. The MongoDB writer wraps every Append in a transaction so cross-process concurrent writes either chain cleanly or fail. The signing seed is loaded from `KINETICZ_ED25519_SEED` so restarts continue the chain with the same key; the matching public key is upserted into the `kineticz_meta` collection at startup AND served at `GET /audit/pubkey` so external verifiers can fetch it without trusting the running process. Timestamps are truncated to millisecond precision before signing to survive the BSON DateTime roundtrip. See `internal/audit/audit.go` and `internal/audit/mongodb/` for details.
 
 ## License
 
