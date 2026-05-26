@@ -3,6 +3,7 @@ package commit
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
@@ -21,6 +22,7 @@ const testDiff = `diff --git a/users.go b/users.go
 `
 
 const testOrig = "line1\nline2\nline3\n"
+const testPatched = "line1\nline2 modified\nline3\n"
 
 type recordingAudit struct {
 	mu      sync.Mutex
@@ -59,12 +61,33 @@ func standardRequest() Request {
 		ProjectID:     "kineticz/pipelines",
 		TargetBranch:  "main",
 		FilePath:      "users.go",
-		OriginalFile:  []byte(testOrig),
-		Diff:          []byte(testDiff),
+		FileContent:   []byte(testPatched),
 		CommitMessage: "Apply Kineticz patch",
 		MRTitle:       "Auto-patch users contract",
 		MRDescription: "Kineticz-generated patch.",
 	}
+}
+
+func TestApplyDiff(t *testing.T) {
+	t.Run("valid_diff_produces_patched_bytes", func(t *testing.T) {
+		out, err := ApplyDiff([]byte(testOrig), []byte(testDiff))
+		if err != nil {
+			t.Fatalf("ApplyDiff: %v", err)
+		}
+		if string(out) != testPatched {
+			t.Errorf("got %q, want %q", out, testPatched)
+		}
+	})
+
+	t.Run("non_diff_input_returns_error", func(t *testing.T) {
+		_, err := ApplyDiff([]byte(testOrig), []byte("not a diff"))
+		if err == nil {
+			t.Fatal("expected error on garbage diff")
+		}
+		if !strings.Contains(err.Error(), "commit:") {
+			t.Errorf("error should prefix with 'commit:', got %v", err)
+		}
+	})
 }
 
 func TestApplyAndOpenMR_HappyPath(t *testing.T) {
@@ -73,7 +96,7 @@ func TestApplyAndOpenMR_HappyPath(t *testing.T) {
 	gl := &gitlab.Mock{
 		CreateCommitFn: func(_ context.Context, req gitlab.CommitRequest) (string, error) {
 			commitCalls++
-			if string(req.FileContent) != "line1\nline2 modified\nline3\n" {
+			if string(req.FileContent) != testPatched {
 				t.Errorf("FileContent unexpected: %q", req.FileContent)
 			}
 			if req.SourceBranch != "kineticz/tok-abc" {
@@ -102,26 +125,6 @@ func TestApplyAndOpenMR_HappyPath(t *testing.T) {
 		t.Errorf("commitCalls=%d mrCalls=%d, want 1/1", commitCalls, mrCalls)
 	}
 	if want := []string{"COMMIT_OK", "MR_CREATED"}; !sameSlice(aw.snapshot(), want) {
-		t.Errorf("audits = %v, want %v", aw.snapshot(), want)
-	}
-}
-
-func TestApplyAndOpenMR_DiffParseError(t *testing.T) {
-	aw := &recordingAudit{}
-	gl := &gitlab.Mock{
-		CreateCommitFn: func(context.Context, gitlab.CommitRequest) (string, error) {
-			t.Error("CreateCommit should not be called when diff parse fails")
-			return "", nil
-		},
-	}
-	c := New(gl, aw)
-	req := standardRequest()
-	req.Diff = []byte("not a diff at all")
-	_, err := c.ApplyAndOpenMR(corr.WithToken(context.Background(), "tok-x"), req)
-	if err == nil {
-		t.Fatal("expected parse error")
-	}
-	if want := []string{"COMMIT_FAILED"}; !sameSlice(aw.snapshot(), want) {
 		t.Errorf("audits = %v, want %v", aw.snapshot(), want)
 	}
 }
@@ -177,7 +180,6 @@ func TestBranchName_FallbackWhenNoToken(t *testing.T) {
 		},
 	}
 	c := New(gl, aw)
-	// No corr.WithToken on ctx
 	_, _ = c.ApplyAndOpenMR(context.Background(), standardRequest())
 	if observedBranch != "kineticz/auto-patch" {
 		t.Errorf("branch = %q, want kineticz/auto-patch", observedBranch)

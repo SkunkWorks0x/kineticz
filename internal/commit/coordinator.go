@@ -25,15 +25,14 @@ func New(gl gitlab.Client, aw audit.Writer) *Coordinator {
 	return &Coordinator{gl: gl, audit: aw}
 }
 
-// Request is what ApplyAndOpenMR consumes. OriginalFile is the pre-patch
-// content of FilePath; the coordinator parses Diff with go-gitdiff and
-// applies it locally before pushing the resulting file content to GitLab.
+// Request is what ApplyAndOpenMR consumes. FileContent is the post-patch
+// content of FilePath; the caller (orchestrator) is responsible for applying
+// the diff to the original via the public ApplyDiff helper before invoking.
 type Request struct {
 	ProjectID     string
 	TargetBranch  string
 	FilePath      string
-	OriginalFile  []byte
-	Diff          []byte
+	FileContent   []byte
 	CommitMessage string
 	MRTitle       string
 	MRDescription string
@@ -48,17 +47,11 @@ type Result struct {
 	Branch    string
 }
 
-// ApplyAndOpenMR applies the diff, commits the result, then opens an MR.
-// Audit sequence on success: COMMIT_OK, MR_CREATED. On commit failure:
+// ApplyAndOpenMR pushes FileContent as a single-file commit, then opens an
+// MR. Audit sequence on success: COMMIT_OK, MR_CREATED. On commit failure:
 // COMMIT_FAILED. On MR failure after commit: COMMIT_OK + MR_FAILED (the
 // commit landed and must be cleaned up out of band).
 func (c *Coordinator) ApplyAndOpenMR(ctx context.Context, req Request) (*Result, error) {
-	patched, err := applyDiff(req.OriginalFile, req.Diff)
-	if err != nil {
-		_ = c.writeAudit(ctx, "COMMIT_FAILED", req.FilePath, err.Error(), 0, "")
-		return nil, fmt.Errorf("commit: apply diff: %w", err)
-	}
-
 	token, _ := corr.FromContext(ctx)
 	sourceBranch := branchName(token)
 
@@ -67,7 +60,7 @@ func (c *Coordinator) ApplyAndOpenMR(ctx context.Context, req Request) (*Result,
 		SourceBranch:     sourceBranch,
 		TargetBranch:     req.TargetBranch,
 		FilePath:         req.FilePath,
-		FileContent:      patched,
+		FileContent:      req.FileContent,
 		CommitMessage:    req.CommitMessage,
 		CorrelationToken: string(token),
 	})
@@ -94,17 +87,21 @@ func (c *Coordinator) ApplyAndOpenMR(ctx context.Context, req Request) (*Result,
 	return &Result{MRIID: mr.MRIID, MRURL: mr.MRURL, CommitSHA: sha, Branch: sourceBranch}, nil
 }
 
-func applyDiff(orig, diff []byte) ([]byte, error) {
+// ApplyDiff parses a single-file unified diff and applies it against orig,
+// returning the patched bytes. Exposed so the orchestrator can derive the
+// post-patch file content once and pass it to both evaluate and commit
+// without re-parsing the diff.
+func ApplyDiff(orig, diff []byte) ([]byte, error) {
 	files, _, err := gitdiff.Parse(bytes.NewReader(diff))
 	if err != nil {
-		return nil, fmt.Errorf("parse: %w", err)
+		return nil, fmt.Errorf("commit: parse diff: %w", err)
 	}
 	if len(files) != 1 {
-		return nil, fmt.Errorf("expected exactly 1 file in diff, got %d", len(files))
+		return nil, fmt.Errorf("commit: expected exactly 1 file in diff, got %d", len(files))
 	}
 	var out bytes.Buffer
 	if err := gitdiff.Apply(&out, bytes.NewReader(orig), files[0]); err != nil {
-		return nil, fmt.Errorf("apply: %w", err)
+		return nil, fmt.Errorf("commit: apply diff: %w", err)
 	}
 	return out.Bytes(), nil
 }
