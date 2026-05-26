@@ -69,8 +69,18 @@ type vertexPart struct {
 }
 
 type vertexGenConfig struct {
-	Temperature     float64 `json:"temperature,omitempty"`
-	MaxOutputTokens int     `json:"maxOutputTokens,omitempty"`
+	Temperature     float64              `json:"temperature,omitempty"`
+	MaxOutputTokens int                  `json:"maxOutputTokens,omitempty"`
+	ThinkingConfig  *vertexThinkingConfig `json:"thinkingConfig,omitempty"`
+}
+
+// vertexThinkingConfig opts the response into the thinking-block format.
+// `[unverified]` against Vertex-specific REST shape; sourced from Google AI
+// docs at https://ai.google.dev/gemini-api/docs/thinking. If Vertex rejects
+// this field, the response simply omits thought parts and ExtractThought
+// returns "" — the pipeline still runs, just without reasoning capture.
+type vertexThinkingConfig struct {
+	IncludeThoughts bool `json:"includeThoughts"`
 }
 
 type vertexResponse struct {
@@ -168,6 +178,7 @@ func buildVertexRequest(req GenerateRequest) vertexRequest {
 		GenerationConfig: vertexGenConfig{
 			Temperature:     req.Temperature,
 			MaxOutputTokens: req.MaxOutputTokens,
+			ThinkingConfig:  &vertexThinkingConfig{IncludeThoughts: true},
 		},
 	}
 	if req.SystemInstruction != "" {

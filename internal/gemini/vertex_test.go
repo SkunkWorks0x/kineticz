@@ -62,6 +62,12 @@ func TestVertexGenerate(t *testing.T) {
 					http.Error(w, "missing systemInstruction", http.StatusBadRequest)
 					return
 				}
+				genCfg, _ := body["generationConfig"].(map[string]any)
+				thinking, _ := genCfg["thinkingConfig"].(map[string]any)
+				if include, _ := thinking["includeThoughts"].(bool); !include {
+					http.Error(w, "thinkingConfig.includeThoughts not set", http.StatusBadRequest)
+					return
+				}
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte(`{
 					"candidates": [{
