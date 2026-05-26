@@ -60,7 +60,14 @@ func (g *Gate) Evaluate(ctx context.Context, orig, patched, diff []byte) (*Resul
 
 	local := RunLocal(orig, patched)
 	if local.Verdict == VerdictBlock {
-		g.dedup.Store(sha, struct{}{})
+		// LoadOrStore is atomic: if a concurrent Evaluate raced past the
+		// Load above and got here first, only one of us actually inserts
+		// into the dedup map and writes the audit + index.
+		if _, loaded := g.dedup.LoadOrStore(sha, struct{}{}); loaded {
+			res.Verdict = VerdictBlock
+			res.Deduplicated = true
+			return res, nil
+		}
 		_ = g.audit.Append(ctx, "EVALUATE_LOCAL_BLOCK", payloadJSON(map[string]any{
 			"sha":    sha,
 			"reason": local.Reason,
@@ -77,7 +84,11 @@ func (g *Gate) Evaluate(ctx context.Context, orig, patched, diff []byte) (*Resul
 	})
 	if err != nil {
 		if errors.Is(err, arize.ErrRubricFailed) {
-			g.dedup.Store(sha, struct{}{})
+			if _, loaded := g.dedup.LoadOrStore(sha, struct{}{}); loaded {
+				res.Verdict = VerdictBlock
+				res.Deduplicated = true
+				return res, nil
+			}
 			_ = g.audit.Append(ctx, "EVALUATE_ARIZE_FAIL", payloadJSON(map[string]any{
 				"sha":       sha,
 				"rationale": arizeResp.Rationale,

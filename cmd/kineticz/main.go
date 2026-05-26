@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -57,8 +57,11 @@ type Deps struct {
 }
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	slog.SetDefault(logger)
+
 	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "kineticz: %v\n", err)
+		slog.Error("kineticz failed", "error", err)
 		os.Exit(1)
 	}
 }
@@ -88,7 +91,7 @@ func run() error {
 
 	serverErr := make(chan error, 1)
 	go func() {
-		log.Printf("listening on :%s", cfg.Port)
+		slog.Info("http server listening", "addr", server.Addr)
 		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serverErr <- err
 		}
@@ -98,7 +101,7 @@ func run() error {
 	case err := <-serverErr:
 		return fmt.Errorf("server: %w", err)
 	case <-ctx.Done():
-		log.Println("shutdown signal received")
+		slog.Info("shutdown signal received")
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
@@ -106,7 +109,7 @@ func run() error {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("shutdown: %w", err)
 	}
-	log.Println("kineticz stopped cleanly")
+	slog.Info("kineticz stopped cleanly")
 	return nil
 }
 
@@ -320,13 +323,20 @@ func getenv(key, fallback string) string {
 }
 
 func logStartup(cfg config) {
-	log.Println("--- kineticz startup ---")
-	log.Printf("  port=%s mongo_db=%s", cfg.Port, cfg.MongoDB)
-	log.Printf("  gemini=%s/%s model=%s", cfg.GeminiProjectID, cfg.GeminiLocation, cfg.GeminiModel)
-	log.Printf("  gitlab=%s project=%s target_branch=%s", cfg.GitLabURL, cfg.GitLabProjectID, cfg.GitLabTargetBranch)
-	log.Printf("  arize=%s rubric=%s", cfg.ArizeURL, cfg.ArizeRubricID)
-	log.Printf("  elastic=%s dynatrace=%s", cfg.ElasticURL, cfg.DynatraceURL)
-	log.Println("------------------------")
+	slog.Info("kineticz starting",
+		"port", cfg.Port,
+		"mongo_db", cfg.MongoDB,
+		"gemini_project", cfg.GeminiProjectID,
+		"gemini_location", cfg.GeminiLocation,
+		"gemini_model", cfg.GeminiModel,
+		"gitlab_url", cfg.GitLabURL,
+		"gitlab_project", cfg.GitLabProjectID,
+		"gitlab_target_branch", cfg.GitLabTargetBranch,
+		"arize_url", cfg.ArizeURL,
+		"arize_rubric", cfg.ArizeRubricID,
+		"elastic_url", cfg.ElasticURL,
+		"dynatrace_url", cfg.DynatraceURL,
+	)
 }
 
 func buildDeps(ctx context.Context, cfg config) (Deps, func(), error) {
