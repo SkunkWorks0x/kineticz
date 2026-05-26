@@ -51,7 +51,7 @@ the full pipeline end-to-end; it is gated behind the `integration` build tag.
 
 **Repair.** `repair.Coordinator` runs up to 4 iterations. Each iteration refreshes the target file buffer, prompts Gemini 3.5 Flash with contract + target + mitigations + previous feedback, parses the response with `bluekeyes/go-gitdiff`, and rejects on multi-file, binary, empty hunks, path traversal, or two consecutive empty responses.
 
-**Evaluate.** `evaluate.Gate` runs the local pre-filter first: patched bytes must parse as Go (`go/parser`) and exported function signatures must remain unchanged (`go/ast`). Local BLOCK skips Arize entirely. On local pass, Arize runs the boolean rubric. Rejected diffs are deduplicated by SHA-256 and indexed into Elastic in a detached goroutine.
+**Evaluate.** `evaluate.Gate` runs the local pre-filter first: patched bytes must parse as Go (`go/parser`) and exported function signatures must remain unchanged (`go/ast`). Local BLOCK skips downstream stages entirely. On local pass, Phoenix records the verdict as a trace span for observability. Rejected diffs are deduplicated by SHA-256 and indexed into Elastic in a detached goroutine.
 
 **Commit.** `commit.Coordinator` pushes the post-patch file content to a GitLab branch named `kineticz/<correlation_token>`, then opens a merge request. The MR description prepends `X-Correlation-Token: <token>` so the audit ledger joins to the MR thread. Audit emits `COMMIT_OK` and `MR_CREATED` as distinct entries so the ledger pinpoints which half failed if one does.
 
@@ -65,7 +65,7 @@ the full pipeline end-to-end; it is gated behind the `integration` build tag.
 | Dynatrace | APM + business events | DQL + bizevent ingest, REST | Exposed via `internal/engine/mcp.OutboundTools` |
 | Elastic | RAG via RRF | `_search` retriever block, REST | Exposed via `internal/engine/mcp.OutboundTools` |
 | Gemini 3.5 Flash | Reasoning + patch generation | Vertex AI REST, OAuth | Tool consumer (calls Dynatrace + Elastic via MCP) |
-| Arize | Boolean rubric gate | `/v1/evaluate` REST | n/a |
+| Arize | Observability + tracing | OpenTelemetry via Phoenix | Phoenix MCP (trace queries) |
 | GitLab | Patch application | v4 REST: commits + merge_requests | n/a |
 | MongoDB Atlas | Hash-chained audit ledger | mongo-driver v2, ACID transactions | n/a |
 
