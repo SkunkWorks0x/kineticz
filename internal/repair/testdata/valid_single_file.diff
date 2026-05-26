@@ -1,0 +1,12 @@
+diff --git a/internal/pipeline/users.go b/internal/pipeline/users.go
+index abc1234..def5678 100644
+--- a/internal/pipeline/users.go
++++ b/internal/pipeline/users.go
+@@ -10,5 +10,6 @@ func ParseUser(row map[string]any) (*User, error) {
+ 	if row == nil {
+ 		return nil, errors.New("nil row")
+ 	}
+-	return &User{ID: row["id"].(int64), Email: row["email"].(string)}, nil
++	createdAt, _ := row["created_at"].(time.Time)
++	return &User{ID: row["id"].(int64), Email: row["email"].(string), CreatedAt: createdAt}, nil
+ }

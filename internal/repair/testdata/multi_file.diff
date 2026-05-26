@@ -1,0 +1,16 @@
+diff --git a/internal/pipeline/users.go b/internal/pipeline/users.go
+index abc1234..def5678 100644
+--- a/internal/pipeline/users.go
++++ b/internal/pipeline/users.go
+@@ -1,2 +1,2 @@
+-old line one
++new line one
+ line two
+diff --git a/internal/pipeline/orders.go b/internal/pipeline/orders.go
+index aaa1234..bbb5678 100644
+--- a/internal/pipeline/orders.go
++++ b/internal/pipeline/orders.go
+@@ -1,2 +1,2 @@
+-old order line
++new order line
+ line two
