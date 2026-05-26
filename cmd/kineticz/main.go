@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 
@@ -33,6 +36,8 @@ import (
 
 const (
 	shutdownTimeout = 30 * time.Second
+	metaCollection  = "kineticz_meta"
+	signingKeyDocID = "signing_key"
 )
 
 // Deps is the wired set of orchestration components consumed by WireHandler.
@@ -45,6 +50,7 @@ type Deps struct {
 	Evaluate       *evaluate.Gate
 	Commit         *commit.Coordinator
 	Target         repair.TargetReader
+	PublicKey      ed25519.PublicKey
 	ProjectID      string
 	TargetBranch   string
 	FivetranSecret string
@@ -104,9 +110,7 @@ func run() error {
 	return nil
 }
 
-// WireHandler builds the http.Handler from a populated Deps. The Fivetran
-// receiver's pipeline callback runs the full diagnose → repair → evaluate →
-// commit loop, recording PIPELINE_COMPLETE or PIPELINE_FAILED at the end.
+// WireHandler builds the http.Handler from a populated Deps.
 func WireHandler(d Deps) http.Handler {
 	pipeline := func(ctx context.Context, anomaly fivetran.Anomaly) {
 		runPipeline(ctx, d, anomaly)
@@ -115,6 +119,7 @@ func WireHandler(d Deps) http.Handler {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
+	mux.HandleFunc("/audit/pubkey", pubkeyHandler(d.PublicKey))
 	mux.Handle("/webhooks/fivetran", rec)
 	return mux
 }
@@ -123,6 +128,18 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
+}
+
+// pubkeyHandler serves the base64-encoded Ed25519 public key so judges can
+// independently verify the audit chain against entries in MongoDB.
+func pubkeyHandler(pub ed25519.PublicKey) http.HandlerFunc {
+	encoded := base64.StdEncoding.EncodeToString(pub)
+	body := fmt.Sprintf(`{"algorithm":"ed25519","public_key":"%s"}`, encoded)
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(body))
+	}
 }
 
 func runPipeline(ctx context.Context, d Deps, anomaly fivetran.Anomaly) {
@@ -223,24 +240,25 @@ func (f *fsReader) Read(_ context.Context, path string) ([]byte, error) {
 }
 
 type config struct {
-	Port             string
-	MongoURI         string
-	MongoDB          string
-	GeminiProjectID  string
-	GeminiLocation   string
-	GeminiModel      string
-	GitLabURL        string
-	GitLabToken      string
-	GitLabProjectID  string
+	Port               string
+	MongoURI           string
+	MongoDB            string
+	GeminiProjectID    string
+	GeminiLocation     string
+	GeminiModel        string
+	GitLabURL          string
+	GitLabToken        string
+	GitLabProjectID    string
 	GitLabTargetBranch string
-	ArizeURL         string
-	ArizeAPIKey      string
-	ArizeRubricID    string
-	ElasticURL       string
-	DynatraceURL     string
-	DynatraceToken   string
-	FivetranSecret   string
-	TargetRoot       string
+	ArizeURL           string
+	ArizeAPIKey        string
+	ArizeRubricID      string
+	ElasticURL         string
+	DynatraceURL       string
+	DynatraceToken     string
+	FivetranSecret     string
+	Ed25519SeedHex     string
+	TargetRoot         string
 }
 
 func loadConfig() (config, error) {
@@ -262,21 +280,23 @@ func loadConfig() (config, error) {
 		DynatraceURL:       os.Getenv("DYNATRACE_URL"),
 		DynatraceToken:     os.Getenv("DYNATRACE_TOKEN"),
 		FivetranSecret:     os.Getenv("FIVETRAN_SECRET"),
+		Ed25519SeedHex:     os.Getenv("KINETICZ_ED25519_SEED"),
 		TargetRoot:         getenv("TARGET_ROOT", "."),
 	}
 
 	missing := []string{}
 	for k, v := range map[string]string{
-		"MONGO_URI":         cfg.MongoURI,
-		"GEMINI_PROJECT_ID": cfg.GeminiProjectID,
-		"GITLAB_URL":        cfg.GitLabURL,
-		"GITLAB_TOKEN":      cfg.GitLabToken,
-		"GITLAB_PROJECT_ID": cfg.GitLabProjectID,
-		"ARIZE_URL":         cfg.ArizeURL,
-		"ARIZE_API_KEY":     cfg.ArizeAPIKey,
-		"ELASTIC_URL":       cfg.ElasticURL,
-		"DYNATRACE_URL":     cfg.DynatraceURL,
-		"FIVETRAN_SECRET":   cfg.FivetranSecret,
+		"MONGO_URI":             cfg.MongoURI,
+		"GEMINI_PROJECT_ID":     cfg.GeminiProjectID,
+		"GITLAB_URL":            cfg.GitLabURL,
+		"GITLAB_TOKEN":          cfg.GitLabToken,
+		"GITLAB_PROJECT_ID":     cfg.GitLabProjectID,
+		"ARIZE_URL":             cfg.ArizeURL,
+		"ARIZE_API_KEY":         cfg.ArizeAPIKey,
+		"ELASTIC_URL":           cfg.ElasticURL,
+		"DYNATRACE_URL":         cfg.DynatraceURL,
+		"FIVETRAN_SECRET":       cfg.FivetranSecret,
+		"KINETICZ_ED25519_SEED": cfg.Ed25519SeedHex,
 	} {
 		if v == "" {
 			missing = append(missing, k)
@@ -284,6 +304,9 @@ func loadConfig() (config, error) {
 	}
 	if len(missing) > 0 {
 		return cfg, fmt.Errorf("missing required env vars: %v", missing)
+	}
+	if len(cfg.Ed25519SeedHex) != hex.EncodedLen(ed25519.SeedSize) {
+		return cfg, fmt.Errorf("KINETICZ_ED25519_SEED must be %d hex characters (32 bytes)", hex.EncodedLen(ed25519.SeedSize))
 	}
 	return cfg, nil
 }
@@ -317,14 +340,16 @@ func buildDeps(ctx context.Context, cfg config) (Deps, func(), error) {
 		_ = mongoClient.Disconnect(shutdownCtx)
 	}
 
-	// Generate an Ed25519 keypair at startup. For production, load from
-	// Secret Manager instead — this key is non-persistent across restarts.
-	pub, priv, err := ed25519.GenerateKey(nil)
+	seed, err := hex.DecodeString(cfg.Ed25519SeedHex)
 	if err != nil {
-		return Deps{}, cleanup, fmt.Errorf("ed25519 keygen: %w", err)
+		return Deps{}, cleanup, fmt.Errorf("decode KINETICZ_ED25519_SEED: %w", err)
 	}
-	_ = pub // discarded: verification keys come from secret store in production
-	log.Println("[WARN] generated ephemeral Ed25519 signing key (production should use Secret Manager)")
+	priv := ed25519.NewKeyFromSeed(seed)
+	pub := priv.Public().(ed25519.PublicKey)
+
+	if err := persistPublicKey(ctx, mongoClient, cfg.MongoDB, pub); err != nil {
+		return Deps{}, cleanup, fmt.Errorf("persist public key: %w", err)
+	}
 
 	writer, err := auditmongo.NewMongoWriter(ctx, mongoClient, cfg.MongoDB, priv)
 	if err != nil {
@@ -353,10 +378,26 @@ func buildDeps(ctx context.Context, cfg config) (Deps, func(), error) {
 		Evaluate:       evalGate,
 		Commit:         commitCoord,
 		Target:         target,
+		PublicKey:      pub,
 		ProjectID:      cfg.GitLabProjectID,
 		TargetBranch:   cfg.GitLabTargetBranch,
 		FivetranSecret: cfg.FivetranSecret,
 	}, cleanup, nil
+}
+
+// persistPublicKey upserts the running public key into MongoDB so external
+// verifiers can fetch it without trusting the running process. The /audit/pubkey
+// endpoint serves the same value from memory.
+func persistPublicKey(ctx context.Context, client *mongo.Client, dbName string, pub ed25519.PublicKey) error {
+	coll := client.Database(dbName).Collection(metaCollection)
+	doc := bson.D{
+		{Key: "_id", Value: signingKeyDocID},
+		{Key: "algorithm", Value: "ed25519"},
+		{Key: "public_key", Value: base64.StdEncoding.EncodeToString(pub)},
+		{Key: "rotated_at", Value: time.Now().UTC()},
+	}
+	_, err := coll.ReplaceOne(ctx, bson.D{{Key: "_id", Value: signingKeyDocID}}, doc, options.Replace().SetUpsert(true))
+	return err
 }
 
 // envTokenFunc reads a Google Cloud access token from GOOGLE_ACCESS_TOKEN.

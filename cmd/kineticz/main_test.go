@@ -1,11 +1,44 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 )
+
+func TestPubkeyHandler(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	h := pubkeyHandler(pub)
+	req := httptest.NewRequest(http.MethodGet, "/audit/pubkey", nil)
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Algorithm string `json:"algorithm"`
+		PublicKey string `json:"public_key"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Algorithm != "ed25519" {
+		t.Errorf("algorithm = %q, want ed25519", body.Algorithm)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(body.PublicKey)
+	if err != nil {
+		t.Fatalf("decode public_key base64: %v", err)
+	}
+	if string(decoded) != string(pub) {
+		t.Errorf("decoded public key does not match input")
+	}
+}
 
 func TestHealthHandler(t *testing.T) {
 	cases := []struct {
