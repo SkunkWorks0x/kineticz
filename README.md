@@ -1,55 +1,75 @@
 # Kineticz
 
-High-performance, deterministic DataOps orchestration. Written in Go.
+High-performance, deterministic DataOps orchestration. Detects broken data pipelines, diagnoses the root cause with Gemini 3.5 Flash, gates the patch through Arize, and lands it via GitLab merge request. Every step is hash-chained and Ed25519-signed in MongoDB Atlas.
 
-Module: `github.com/skunkworks0x/kineticz` (Go 1.26.2)
+## Problem
 
-## Status
+Upstream schema changes break downstream consumers silently. On-call engineers spend hours triaging when the fix is a one-line diff.
 
-Pre-implementation. The repository contains design constraints and a module scaffold. No runtime code yet.
+## Architecture
 
-## Design Constraints
-
-Every change to this codebase obeys the rules below. Source of truth: `CLAUDE.md`.
-
-### Types
-- IDs are typed. Example: `type CorrelationToken string`. No raw floating strings.
-- Every JSON payload has a `Validate() error` method.
-- Decoders use `json.NewDecoder.DisallowUnknownFields()`.
-
-### Errors
-- Check every returned error.
-- Wrap with `fmt.Errorf("context: %w", err)`.
-
-### Concurrency
-- Counters use `sync/atomic`.
-- Buffered channels only for fixed-size worker pools.
-
-### Audit
-- State changes are hash-chained and Ed25519-signed.
-- Audit storage: MongoDB Atlas.
-
-## Commands
-
-```
-go build ./...
-go test -v -race ./...
-go mod tidy
+```mermaid
+flowchart LR
+    F[Fivetran webhook] -->|HMAC-verified| FR[fivetran.Receiver]
+    FR -->|FIVETRAN_RECEIVED| MG[(MongoDB audit_ledger)]
+    FR -->|Anomaly + CorrelationToken| D[diagnose.Engine]
+    D -->|parallel| DT[Dynatrace DQL]
+    D -->|parallel| E[Elastic RRF retriever]
+    DT -.->|ConsumerHealth| D
+    E -.->|ContractContext| D
+    D -->|DiagnosisResult| R[repair.Coordinator]
+    R -->|prompt + thought| G[Gemini 3.5 Flash]
+    G -.->|unified diff| R
+    R -->|approved diff| EV[evaluate.Gate]
+    EV -->|local pre-filter| EV
+    EV -->|if pass| A[Arize boolean rubric]
+    A -.->|PASS or FAIL| EV
+    EV -->|if ALLOW| C[commit.Coordinator]
+    C -->|file + MR| GL[GitLab]
+    GL -.->|MR URL| C
+    C -->|PIPELINE_COMPLETE| MG
 ```
 
-## Layout
+## Quickstart
 
+```sh
+git clone https://github.com/skunkworks0x/kineticz && cd kineticz
+cp .env.example .env && $EDITOR .env   # populate the 11 required vars
+go test -race ./...
+docker build -t kineticz .
+docker run --env-file .env -p 8080:8080 kineticz
 ```
-.
-├── CLAUDE.md             System rules: style, safety, identity
-├── .claude/rules/        Project-specific style and safety rules
-├── go.mod                Go module definition
-├── program.md            Empty
-└── README.md             This file
-```
 
-## Contributing
+## How it works
 
-Read `CLAUDE.md` and `.claude/rules/no-slop.md` before writing code or prose. Both are enforced on every diff.
+**Detect.** Fivetran webhook delivers a schema-change event. `fivetran.Receiver` verifies HMAC-SHA256 against the shared secret, deduplicates by event ID against MongoDB, mints a `CorrelationToken`, and writes `FIVETRAN_RECEIVED` before handing off to a background pipeline goroutine.
 
-One change per commit. Imperative commit messages under 50 characters.
+**Diagnose.** `diagnose.Engine` fans out two calls under a 5-second timeout via a buffered channel of capacity 2. Elastic returns the contract YAML and top-3 historical mitigations via Reciprocal Rank Fusion (BM25 on column names + KNN on diff embeddings, `rank_constant=60`). Dynatrace returns downstream consumer health via DQL. Elastic failure is hard fail; Dynatrace `ErrTelemetryUnavailable` is soft fail (Degraded mode).
+
+**Repair.** `repair.Coordinator` runs up to 4 iterations. Each iteration refreshes the target file buffer, prompts Gemini 3.5 Flash with contract + target + mitigations + previous feedback, parses the response with `bluekeyes/go-gitdiff`, and rejects on multi-file, binary, empty hunks, path traversal, or two consecutive empty responses.
+
+**Evaluate.** `evaluate.Gate` runs the local pre-filter first: patched bytes must parse as Go (`go/parser`) and exported function signatures must remain unchanged (`go/ast`). Local BLOCK skips Arize entirely. On local pass, Arize runs the boolean rubric. Rejected diffs are deduplicated by SHA-256 and indexed into Elastic in a detached goroutine.
+
+**Commit.** `commit.Coordinator` pushes the post-patch file content to a GitLab branch named `kineticz/<correlation_token>`, then opens a merge request. The MR description prepends `X-Correlation-Token: <token>` so the audit ledger joins to the MR thread. Audit emits `COMMIT_OK` and `MR_CREATED` as distinct entries so the ledger pinpoints which half failed if one does.
+
+**Audit.** Every transition writes an `audit.Entry` chained to the previous hash and signed with Ed25519. The hash covers `PreviousHash || Action || Payload || Thought || Timestamp` with 8-byte big-endian length prefixes. Tampering with any byte invalidates the chain.
+
+## Partner integrations
+
+| Partner | Role | Integration | MCP |
+|---|---|---|---|
+| Fivetran | Schema-change source | HMAC-verified webhook | n/a (inbound) |
+| Dynatrace | APM + business events | DQL + bizevent ingest, REST | Exposed via `internal/engine/mcp.OutboundTools` |
+| Elastic | RAG via RRF | `_search` retriever block, REST | Exposed via `internal/engine/mcp.OutboundTools` |
+| Gemini 3.5 Flash | Reasoning + patch generation | Vertex AI REST, OAuth | Tool consumer (calls Dynatrace + Elastic via MCP) |
+| Arize | Boolean rubric gate | `/v1/evaluate` REST | n/a |
+| GitLab | Patch application | v4 REST: commits + merge_requests | n/a |
+| MongoDB Atlas | Hash-chained audit ledger | mongo-driver v2, ACID transactions | n/a |
+
+## Audit chain
+
+`internal/audit` defines a length-prefixed canonical encoding so two implementations can compute the same SHA-256 without coordination. `audit.Chain` signs with Ed25519; `audit.Verify` checks linkage, hash, and signature. The MongoDB writer wraps every Append in a transaction so cross-process concurrent writes either chain cleanly or fail. See `internal/audit/audit.go` and `internal/audit/mongodb/` for details.
+
+## License
+
+MIT. See [LICENSE](./LICENSE).
