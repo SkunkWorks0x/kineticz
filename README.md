@@ -21,13 +21,13 @@ flowchart LR
     R -->|prompt + thought| G[Gemini 3.5 Flash]
     G -.->|unified diff| R
     R -->|approved diff| EV[evaluate.Gate]
-    EV -->|local pre-filter| EV
-    EV -->|if pass| A[Arize boolean rubric]
-    A -.->|PASS or FAIL| EV
-    EV -->|if ALLOW| C[commit.Coordinator]
+    EV -->|ParsesAsGo + PreservesSignature| EV
+    EV -->|PASS| C[commit.Coordinator]
+    EV -->|BLOCK| FAIL[rejected: audited + indexed]
     C -->|file + MR| GL[GitLab]
     GL -.->|MR URL| C
     C -->|PIPELINE_COMPLETE| MG
+    FR -.->|OTel traces| PH[Phoenix Cloud]
 ```
 
 ## Quickstart
