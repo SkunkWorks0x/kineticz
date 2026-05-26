@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/skunkworks0x/kineticz/internal/audit"
+	"github.com/skunkworks0x/kineticz/internal/httputil"
 )
 
 type Client interface {
@@ -195,46 +196,28 @@ func (c *client) recordAudit(ctx context.Context, action, contract string, callE
 }
 
 func (c *client) do(ctx context.Context, method, path string, body []byte) ([]byte, int, error) {
-	url := c.baseURL + path
-	var lastErr error
-	delay := c.backoff
-	for attempt := 0; attempt < c.retries; attempt++ {
-		var req *http.Request
-		var err error
-		if body != nil {
-			req, err = http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
-			if err == nil {
-				req.Header.Set("Content-Type", "application/json")
-			}
-		} else {
-			req, err = http.NewRequestWithContext(ctx, method, url, nil)
-		}
-		if err != nil {
-			return nil, 0, fmt.Errorf("elastic: build request: %w", err)
-		}
-		resp, err := c.http.Do(req)
-		if err != nil {
-			lastErr = err
-		} else {
-			buf, readErr := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if readErr != nil {
-				lastErr = readErr
-			} else if resp.StatusCode >= 500 {
-				lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(buf))
-			} else {
-				return buf, resp.StatusCode, nil
-			}
-		}
-		if attempt+1 >= c.retries {
-			break
-		}
-		select {
-		case <-ctx.Done():
-			return nil, 0, ctx.Err()
-		case <-time.After(delay):
-			delay *= 2
-		}
+	var bodyReader io.Reader
+	if body != nil {
+		bodyReader = bytes.NewReader(body)
 	}
-	return nil, 0, fmt.Errorf("%w: %v", ErrElasticUnavailable, lastErr)
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
+	if err != nil {
+		return nil, 0, fmt.Errorf("elastic: build request: %w", err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := httputil.Do(ctx, c.http, req, c.retries, c.backoff)
+	if err != nil {
+		if errors.Is(err, httputil.ErrUnavailable) {
+			return nil, 0, fmt.Errorf("%w: %v", ErrElasticUnavailable, err)
+		}
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+	buf, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, 0, fmt.Errorf("elastic: read body: %w", err)
+	}
+	return buf, resp.StatusCode, nil
 }
