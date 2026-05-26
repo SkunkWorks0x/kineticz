@@ -7,12 +7,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"runtime/debug"
 	"time"
 
+	"github.com/skunkworks0x/kineticz/internal/audit"
 	"github.com/skunkworks0x/kineticz/internal/corr"
 )
 
@@ -79,21 +81,20 @@ func (r *Receiver) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	already, err := r.store.HasEntry(req.Context(), anomaly.EventID)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("idempotency lookup failed: %v", err), http.StatusInternalServerError)
-		return
-	}
-	if already {
+	token := corr.New()
+	ctx := corr.WithToken(req.Context(), token)
+	payload, _ := json.Marshal(anomaly)
+
+	// Atomic idempotency: the unique partial index on source_event_id makes
+	// concurrent deliveries with the same event ID race in the database.
+	// The loser receives audit.ErrDuplicateEvent and skips processing.
+	err = r.store.AppendWithEvent(ctx, "FIVETRAN_RECEIVED", payload, anomaly.EventID)
+	if errors.Is(err, audit.ErrDuplicateEvent) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"duplicate","event_id":"` + anomaly.EventID + `"}`))
 		return
 	}
-
-	token := corr.New()
-	ctx := corr.WithToken(req.Context(), token)
-	payload, _ := json.Marshal(anomaly)
-	if err := r.store.AppendWithEvent(ctx, "FIVETRAN_RECEIVED", payload, anomaly.EventID); err != nil {
+	if err != nil {
 		http.Error(w, fmt.Sprintf("audit write failed: %v", err), http.StatusInternalServerError)
 		return
 	}

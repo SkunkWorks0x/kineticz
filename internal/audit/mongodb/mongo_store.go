@@ -21,10 +21,17 @@ import (
 // chained entry.
 func NewMongoWriter(ctx context.Context, client *mongo.Client, dbName string, priv ed25519.PrivateKey) (*Writer, error) {
 	coll := client.Database(dbName).Collection(CollectionName)
+	uniqueOnEventID := options.Index().
+		SetUnique(true).
+		SetPartialFilterExpression(bson.D{{Key: "source_event_id", Value: bson.D{{Key: "$exists", Value: true}}}})
 	if _, err := coll.Indexes().CreateMany(ctx, []mongo.IndexModel{
 		{Keys: bson.D{{Key: "correlation_token", Value: 1}}},
 		{Keys: bson.D{{Key: "timestamp", Value: -1}}},
-		{Keys: bson.D{{Key: "source_event_id", Value: 1}}},
+		// Unique partial index enforces atomic idempotency: concurrent webhook
+		// deliveries with the same source_event_id race in the database, the
+		// loser receives a duplicate-key error, and Insert wraps that as
+		// audit.ErrDuplicateEvent for the fivetran receiver to detect.
+		{Keys: bson.D{{Key: "source_event_id", Value: 1}}, Options: uniqueOnEventID},
 	}); err != nil {
 		return nil, fmt.Errorf("audit/mongodb: create indexes: %w", err)
 	}
@@ -94,6 +101,9 @@ func (m *mongoStore) Latest(ctx context.Context) (*audit.Entry, error) {
 
 func (m *mongoStore) Insert(ctx context.Context, e *audit.Entry) error {
 	if _, err := m.coll.InsertOne(ctx, entryToDoc(e)); err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			return fmt.Errorf("%w: %v", audit.ErrDuplicateEvent, err)
+		}
 		return fmt.Errorf("audit/mongodb: insert: %w", err)
 	}
 	return nil

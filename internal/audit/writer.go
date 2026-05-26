@@ -1,6 +1,15 @@
 package audit
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrDuplicateEvent signals that a webhook-style append was rejected because
+// an entry with the same source event ID already exists. AppendWithEvent
+// callers (the fivetran receiver) check errors.Is against this sentinel to
+// distinguish idempotent skips from real storage failures.
+var ErrDuplicateEvent = errors.New("audit: duplicate source event ID")
 
 type Writer interface {
 	Append(ctx context.Context, action string, payload []byte) error

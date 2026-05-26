@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -36,6 +37,14 @@ func (s *fakeStore) Insert(_ context.Context, e *audit.Entry) error {
 	s.insertCalls++
 	if s.insertErr != nil {
 		return s.insertErr
+	}
+	// Simulate the unique partial index on source_event_id.
+	if e.SourceEventID != "" {
+		for _, existing := range s.entries {
+			if existing.SourceEventID == e.SourceEventID {
+				return fmt.Errorf("%w: %s", audit.ErrDuplicateEvent, e.SourceEventID)
+			}
+		}
 	}
 	s.entries = append(s.entries, e)
 	return nil
@@ -248,6 +257,27 @@ func TestAppend_TimestampMillisecondRoundtrip(t *testing.T) {
 	e.Timestamp = rounded
 	if err := audit.Verify(*e, nil, pub); err != nil {
 		t.Fatalf("Verify after millisecond truncation: %v", err)
+	}
+}
+
+func TestAppendWithEvent_DuplicateReturnsErrDuplicateEvent(t *testing.T) {
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	fs := &fakeStore{}
+	w := NewWriter(fs, priv)
+	ctx := corr.WithToken(context.Background(), "tok-dup")
+	const eventID = "evt-xyz"
+	if err := w.AppendWithEvent(ctx, "FIVETRAN_RECEIVED", []byte(`{"a":1}`), eventID); err != nil {
+		t.Fatalf("first AppendWithEvent: %v", err)
+	}
+	err2 := w.AppendWithEvent(ctx, "FIVETRAN_RECEIVED", []byte(`{"a":2}`), eventID)
+	if !errors.Is(err2, audit.ErrDuplicateEvent) {
+		t.Fatalf("second AppendWithEvent err = %v, want ErrDuplicateEvent", err2)
+	}
+	if len(fs.entries) != 1 {
+		t.Errorf("entries = %d, want 1 (duplicate must not insert)", len(fs.entries))
 	}
 }
 

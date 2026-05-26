@@ -12,15 +12,15 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/skunkworks0x/kineticz/internal/audit"
 )
 
 type fakeStore struct {
-	mu              sync.Mutex
-	entries         []recordedEvent
-	hasEntryResult  bool
-	hasEntryErr     error
-	appendErr       error
-	hasEntryCalls   int
+	mu        sync.Mutex
+	entries   []recordedEvent
+	appendErr error
+	preExists string // when non-empty, AppendWithEvent returns ErrDuplicateEvent for this event_id
 }
 
 type recordedEvent struct {
@@ -45,15 +45,32 @@ func (s *fakeStore) AppendWithEvent(_ context.Context, action string, payload []
 	if s.appendErr != nil {
 		return s.appendErr
 	}
+	if eventID != "" {
+		if s.preExists == eventID {
+			return audit.ErrDuplicateEvent
+		}
+		for _, e := range s.entries {
+			if e.EventID == eventID {
+				return audit.ErrDuplicateEvent
+			}
+		}
+	}
 	s.entries = append(s.entries, recordedEvent{Action: action, EventID: eventID, Payload: append([]byte(nil), payload...)})
 	return nil
 }
 
-func (s *fakeStore) HasEntry(_ context.Context, _ string) (bool, error) {
+func (s *fakeStore) HasEntry(_ context.Context, eventID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.hasEntryCalls++
-	return s.hasEntryResult, s.hasEntryErr
+	if eventID == "" {
+		return false, nil
+	}
+	for _, e := range s.entries {
+		if e.EventID == eventID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *fakeStore) snapshot() []recordedEvent {
@@ -79,7 +96,7 @@ func TestReceiver(t *testing.T) {
 		name           string
 		body           string
 		signature      string
-		hasEntry       bool
+		preExistsID    string
 		wantStatus     int
 		wantAuditCount int
 		wantPipeline   bool
@@ -108,7 +125,7 @@ func TestReceiver(t *testing.T) {
 			name:           "duplicate_event_returns_200_and_skips_pipeline",
 			body:           validBody,
 			signature:      signBody([]byte(validBody)),
-			hasEntry:       true,
+			preExistsID:    "syn_abc123",
 			wantStatus:     http.StatusOK,
 			wantAuditCount: 0,
 		},
@@ -128,7 +145,7 @@ func TestReceiver(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			store := &fakeStore{hasEntryResult: tc.hasEntry}
+			store := &fakeStore{preExists: tc.preExistsID}
 			pipelineCalled := make(chan struct{}, 1)
 			pipeline := func(_ context.Context, _ Anomaly) {
 				pipelineCalled <- struct{}{}
