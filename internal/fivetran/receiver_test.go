@@ -162,10 +162,37 @@ func TestReceiver(t *testing.T) {
 				case <-pipelineCalled:
 					t.Error("pipeline was invoked but should not have been")
 				case <-time.After(50 * time.Millisecond):
-					// expected: not called
 				}
 			}
 		})
+	}
+}
+
+func TestReceiver_PanicInPipelineIsRecoveredAndAudited(t *testing.T) {
+	store := &fakeStore{}
+	r := NewReceiver(store, secret, func(context.Context, Anomaly) {
+		panic("simulated downstream crash")
+	})
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/fivetran", bytes.NewReader([]byte(validBody)))
+	req.Header.Set(SignatureHeader, signBody([]byte(validBody)))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", rec.Code)
+	}
+	// Wait for the goroutine to panic, recover, and audit.
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("PIPELINE_PANICKED audit never written. actions: %v", store.snapshot())
+		case <-time.After(20 * time.Millisecond):
+		}
+		for _, e := range store.snapshot() {
+			if e.Action == "PIPELINE_PANICKED" {
+				return
+			}
+		}
 	}
 }
 
@@ -234,7 +261,6 @@ func TestAnomaly_Validate(t *testing.T) {
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
-			// errors.Is via wrapped sentinel
 			if !strings.Contains(err.Error(), tc.wantErrIs.Error()) {
 				t.Errorf("err = %v, want contains %v", err, tc.wantErrIs)
 			}

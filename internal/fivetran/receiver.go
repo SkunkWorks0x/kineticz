@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime/debug"
+	"time"
 
 	"github.com/skunkworks0x/kineticz/internal/corr"
 )
@@ -18,6 +20,11 @@ import (
 // the raw request body. Fivetran's actual header name may differ; verify
 // against the partner's webhook docs before production.
 const SignatureHeader = "X-Fivetran-Signature"
+
+// PipelineTimeout caps total wall-clock time for the orchestration goroutine.
+// The goroutine runs with a context detached from the request, so this is
+// the only deadline preventing a hung Gemini call from leaking forever.
+const PipelineTimeout = 5 * time.Minute
 
 // PipelineFunc is the orchestrator callback invoked after a successful
 // receipt. It runs the full diagnose → repair → evaluate → commit loop in
@@ -34,9 +41,6 @@ type Receiver struct {
 	pipeline PipelineFunc
 }
 
-// NewReceiver wires a Receiver. secret is the shared HMAC secret with
-// Fivetran. pipeline runs in a goroutine after each successful receipt and
-// must be safe for concurrent execution.
 func NewReceiver(store EventStore, secret string, pipeline PipelineFunc) *Receiver {
 	return &Receiver{
 		store:    store,
@@ -94,15 +98,36 @@ func (r *Receiver) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Detach the context so the request returning does not cancel the
-	// pipeline. The CorrelationToken value still propagates.
 	if r.pipeline != nil {
-		bgCtx := context.WithoutCancel(ctx)
-		go r.pipeline(bgCtx, anomaly)
+		r.spawnPipeline(ctx, anomaly)
 	}
 
 	w.WriteHeader(http.StatusAccepted)
 	_, _ = w.Write([]byte(`{"status":"accepted","event_id":"` + anomaly.EventID + `","correlation_token":"` + string(token) + `"}`))
+}
+
+// spawnPipeline runs the orchestrator with a detached context (so the request
+// returning does not cancel it) wrapped in a 5-minute timeout (so a hung
+// upstream cannot leak the goroutine forever). Panics inside the pipeline
+// are recovered and recorded as PIPELINE_PANICKED audit entries.
+func (r *Receiver) spawnPipeline(ctx context.Context, anomaly Anomaly) {
+	bgCtx := context.WithoutCancel(ctx)
+	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				stack := debug.Stack()
+				payload, _ := json.Marshal(map[string]any{
+					"event_id": anomaly.EventID,
+					"panic":    fmt.Sprintf("%v", p),
+					"stack":    string(stack),
+				})
+				_ = r.store.Append(bgCtx, "PIPELINE_PANICKED", payload)
+			}
+		}()
+		timedCtx, cancel := context.WithTimeout(bgCtx, PipelineTimeout)
+		defer cancel()
+		r.pipeline(timedCtx, anomaly)
+	}()
 }
 
 func (r *Receiver) verifySignature(body []byte, headerValue string) bool {
