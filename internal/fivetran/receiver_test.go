@@ -83,12 +83,20 @@ func (s *fakeStore) snapshot() []recordedEvent {
 
 const secret = "test-shared-secret"
 
-const validBody = `{"event_id":"syn_abc123","event_type":"schema_change","schema_name":"users_schema","table_name":"users","column_changes":[{"column":"created_at","action":"added","new_type":"timestamp"}],"timestamp":"2026-05-26T10:00:00Z"}`
+// triggerBody is a real Fivetran sync_end webhook with FAILURE_WITH_TASK,
+// which TriggersRepair() reports as true.
+const triggerBody = `{"event":"sync_end","created":"2026-05-26T10:00:00.000Z","connector_type":"postgres","connector_id":"conn_abc123","connector_name":"users_pg","sync_id":"syn_def456","destination_group_id":"warehouse_main","data":{"status":"FAILURE_WITH_TASK"}}`
+
+// ackOnlyBody is a real Fivetran sync_start webhook that should be acked
+// with 200 OK but not trigger the pipeline.
+const ackOnlyBody = `{"event":"sync_start","created":"2026-05-26T10:00:00.000Z","connector_type":"postgres","connector_id":"conn_abc123","connector_name":"users_pg","sync_id":"syn_def456","destination_group_id":"warehouse_main"}`
 
 func signBody(body []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(body)
-	return hex.EncodeToString(mac.Sum(nil))
+	// Fivetran sends uppercase hex; mimic that here so the test exercises
+	// the case-insensitive comparison path in verifySignature.
+	return strings.ToUpper(hex.EncodeToString(mac.Sum(nil)))
 }
 
 func TestReceiver(t *testing.T) {
@@ -102,30 +110,38 @@ func TestReceiver(t *testing.T) {
 		wantPipeline   bool
 	}{
 		{
-			name:           "valid_signature_and_payload_returns_202",
-			body:           validBody,
-			signature:      signBody([]byte(validBody)),
+			name:           "trigger_event_returns_202_and_runs_pipeline",
+			body:           triggerBody,
+			signature:      signBody([]byte(triggerBody)),
 			wantStatus:     http.StatusAccepted,
 			wantAuditCount: 1,
 			wantPipeline:   true,
 		},
 		{
+			name:           "non_trigger_event_returns_200_and_skips_pipeline",
+			body:           ackOnlyBody,
+			signature:      signBody([]byte(ackOnlyBody)),
+			wantStatus:     http.StatusOK,
+			wantAuditCount: 1, // still audit-recorded for visibility
+			wantPipeline:   false,
+		},
+		{
 			name:       "invalid_signature_returns_401",
-			body:       validBody,
+			body:       triggerBody,
 			signature:  "deadbeef",
 			wantStatus: http.StatusUnauthorized,
 		},
 		{
 			name:       "missing_signature_returns_401",
-			body:       validBody,
+			body:       triggerBody,
 			signature:  "",
 			wantStatus: http.StatusUnauthorized,
 		},
 		{
 			name:           "duplicate_event_returns_200_and_skips_pipeline",
-			body:           validBody,
-			signature:      signBody([]byte(validBody)),
-			preExistsID:    "syn_abc123",
+			body:           triggerBody,
+			signature:      signBody([]byte(triggerBody)),
+			preExistsID:    "sync_end:syn_def456",
 			wantStatus:     http.StatusOK,
 			wantAuditCount: 0,
 		},
@@ -136,9 +152,9 @@ func TestReceiver(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 		},
 		{
-			name:       "valid_json_but_validate_fails_returns_400",
-			body:       `{"event_id":"","event_type":"schema_change","schema_name":"s","table_name":"t","timestamp":"2026-05-26T10:00:00Z"}`,
-			signature:  signBody([]byte(`{"event_id":"","event_type":"schema_change","schema_name":"s","table_name":"t","timestamp":"2026-05-26T10:00:00Z"}`)),
+			name:       "missing_required_fields_returns_400",
+			body:       `{"event":"sync_end"}`,
+			signature:  signBody([]byte(`{"event":"sync_end"}`)),
 			wantStatus: http.StatusBadRequest,
 		},
 	}
@@ -165,7 +181,7 @@ func TestReceiver(t *testing.T) {
 
 			got := store.snapshot()
 			if len(got) != tc.wantAuditCount {
-				t.Errorf("audit count = %d, want %d", len(got), tc.wantAuditCount)
+				t.Errorf("audit count = %d, want %d (entries: %+v)", len(got), tc.wantAuditCount, got)
 			}
 
 			if tc.wantPipeline {
@@ -190,14 +206,13 @@ func TestReceiver_PanicInPipelineIsRecoveredAndAudited(t *testing.T) {
 	r := NewReceiver(store, secret, func(context.Context, Anomaly) {
 		panic("simulated downstream crash")
 	})
-	req := httptest.NewRequest(http.MethodPost, "/webhooks/fivetran", bytes.NewReader([]byte(validBody)))
-	req.Header.Set(SignatureHeader, signBody([]byte(validBody)))
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/fivetran", bytes.NewReader([]byte(triggerBody)))
+	req.Header.Set(SignatureHeader, signBody([]byte(triggerBody)))
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202", rec.Code)
 	}
-	// Wait for the goroutine to panic, recover, and audit.
 	deadline := time.After(2 * time.Second)
 	for {
 		select {
@@ -230,8 +245,8 @@ func TestReceiver_AcceptedResponseIncludesCorrelationToken(t *testing.T) {
 	store := &fakeStore{}
 	r := NewReceiver(store, secret, func(context.Context, Anomaly) {})
 
-	req := httptest.NewRequest(http.MethodPost, "/webhooks/fivetran", bytes.NewReader([]byte(validBody)))
-	req.Header.Set(SignatureHeader, signBody([]byte(validBody)))
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/fivetran", bytes.NewReader([]byte(triggerBody)))
+	req.Header.Set(SignatureHeader, signBody([]byte(triggerBody)))
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, req)
 
@@ -241,8 +256,36 @@ func TestReceiver_AcceptedResponseIncludesCorrelationToken(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"correlation_token":"`) {
 		t.Errorf("response missing correlation_token: %s", rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), `"event_id":"syn_abc123"`) {
-		t.Errorf("response missing event_id: %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), `"event_id":"sync_end:syn_def456"`) {
+		t.Errorf("response missing composite event_id: %s", rec.Body.String())
+	}
+}
+
+func TestAnomaly_TriggersRepair(t *testing.T) {
+	cases := []struct {
+		name string
+		a    Anomaly
+		want bool
+	}{
+		{"sync_end_with_FAILURE_WITH_TASK_triggers", Anomaly{Event: "sync_end", Data: map[string]any{"status": "FAILURE_WITH_TASK"}}, true},
+		{"sync_end_with_SUCCESSFUL_does_not_trigger", Anomaly{Event: "sync_end", Data: map[string]any{"status": "SUCCESSFUL"}}, false},
+		{"transformation_failed_triggers", Anomaly{Event: "transformation_failed"}, true},
+		{"sync_start_does_not_trigger", Anomaly{Event: "sync_start"}, false},
+		{"connection_successful_does_not_trigger", Anomaly{Event: "connection_successful"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.a.TriggersRepair(); got != tc.want {
+				t.Errorf("TriggersRepair = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAnomaly_EventID(t *testing.T) {
+	a := Anomaly{Event: "sync_end", SyncID: "syn_abc"}
+	if got := a.EventID(); got != "sync_end:syn_abc" {
+		t.Errorf("EventID = %q, want sync_end:syn_abc", got)
 	}
 }
 
@@ -253,31 +296,17 @@ func TestAnomaly_Validate(t *testing.T) {
 		wantErrIs error
 	}{
 		{
-			name: "valid_schema_change",
+			name: "valid",
 			a: &Anomaly{
-				EventID:    "id1",
-				EventType:  "schema_change",
-				SchemaName: "s",
-				TableName:  "t",
-				Timestamp:  time.Unix(1716696000, 0),
+				Event:       "sync_end",
+				ConnectorID: "conn_x",
+				SyncID:      "syn_y",
 			},
 		},
-		{
-			name: "unsupported_event_type",
-			a: &Anomaly{
-				EventID:    "id1",
-				EventType:  "row_changed",
-				SchemaName: "s",
-				TableName:  "t",
-				Timestamp:  time.Unix(1716696000, 0),
-			},
-			wantErrIs: ErrMalformedPayload,
-		},
-		{
-			name:      "nil_anomaly",
-			a:         nil,
-			wantErrIs: ErrMalformedPayload,
-		},
+		{"nil", nil, ErrMalformedPayload},
+		{"missing_event", &Anomaly{ConnectorID: "c", SyncID: "s"}, ErrMalformedPayload},
+		{"missing_connector_id", &Anomaly{Event: "sync_end", SyncID: "s"}, ErrMalformedPayload},
+		{"missing_sync_id", &Anomaly{Event: "sync_end", ConnectorID: "c"}, ErrMalformedPayload},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

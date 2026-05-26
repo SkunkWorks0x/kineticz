@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/skunkworks0x/kineticz/internal/audit"
@@ -19,10 +20,8 @@ import (
 )
 
 // SignatureHeader carries the HMAC-SHA256 hex digest of the raw request body.
-// `[unverified]` against the official Fivetran webhook docs as of this commit;
-// the constant was chosen to mirror the industry-standard sha256 suffix used
-// by GitHub and others. Confirm at https://fivetran.com/docs/ before final
-// submission and rename if Fivetran uses a different value.
+// Fivetran sends the digest UPPERCASE-hex; verifySignature normalizes both
+// sides before constant-time comparison.
 const SignatureHeader = "X-Fivetran-Signature-256"
 
 // MaxBodyBytes caps inbound webhook payload size to prevent OOM via a flood
@@ -91,18 +90,26 @@ func (r *Receiver) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	token := corr.New()
 	ctx := corr.WithToken(req.Context(), token)
 	payload, _ := json.Marshal(anomaly)
+	eventID := anomaly.EventID()
 
 	// Atomic idempotency: the unique partial index on source_event_id makes
 	// concurrent deliveries with the same event ID race in the database.
 	// The loser receives audit.ErrDuplicateEvent and skips processing.
-	err = r.store.AppendWithEvent(ctx, "FIVETRAN_RECEIVED", payload, anomaly.EventID)
+	err = r.store.AppendWithEvent(ctx, "FIVETRAN_RECEIVED", payload, eventID)
 	if errors.Is(err, audit.ErrDuplicateEvent) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"duplicate","event_id":"` + anomaly.EventID + `"}`))
+		_, _ = w.Write([]byte(`{"status":"duplicate","event_id":"` + eventID + `"}`))
 		return
 	}
 	if err != nil {
 		http.Error(w, fmt.Sprintf("audit write failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Non-failure events are acknowledged but do not trigger the pipeline.
+	if !anomaly.TriggersRepair() {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"acknowledged","event_id":"` + eventID + `","event":"` + anomaly.Event + `"}`))
 		return
 	}
 
@@ -111,7 +118,7 @@ func (r *Receiver) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusAccepted)
-	_, _ = w.Write([]byte(`{"status":"accepted","event_id":"` + anomaly.EventID + `","correlation_token":"` + string(token) + `"}`))
+	_, _ = w.Write([]byte(`{"status":"accepted","event_id":"` + eventID + `","correlation_token":"` + string(token) + `"}`))
 }
 
 // spawnPipeline runs the orchestrator with a detached context (so the request
@@ -144,15 +151,18 @@ func (r *Receiver) verifySignature(body []byte, headerValue string) bool {
 	}
 	mac := hmac.New(sha256.New, r.secret)
 	mac.Write(body)
-	expected := hex.EncodeToString(mac.Sum(nil))
-	return hmac.Equal([]byte(expected), []byte(headerValue))
+	// Fivetran sends uppercase hex; normalize both before constant-time
+	// compare so casing differences from clients don't cause false 401s.
+	expected := strings.ToUpper(hex.EncodeToString(mac.Sum(nil)))
+	got := strings.ToUpper(headerValue)
+	return hmac.Equal([]byte(expected), []byte(got))
 }
 
 func parseAnomaly(body []byte) (Anomaly, error) {
-	dec := json.NewDecoder(bytes.NewReader(body))
-	dec.DisallowUnknownFields()
+	// Fivetran may add fields to the webhook over time; tolerate unknown
+	// fields rather than rejecting future-shape payloads.
 	var out Anomaly
-	if err := dec.Decode(&out); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&out); err != nil {
 		return Anomaly{}, fmt.Errorf("%w: %v", ErrMalformedPayload, err)
 	}
 	return out, nil
