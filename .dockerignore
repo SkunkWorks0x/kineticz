@@ -1,0 +1,9 @@
+.git
+.claude
+**/*_test.go
+**/testdata
+Dockerfile
+.dockerignore
+service.yaml
+README.md
+LICENSE

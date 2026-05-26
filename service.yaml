@@ -1,0 +1,85 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: kineticz
+  annotations:
+    run.googleapis.com/launch-stage: BETA
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/maxScale: "10"
+        run.googleapis.com/execution-environment: gen2
+        run.googleapis.com/cpu-throttling: "false"
+    spec:
+      timeoutSeconds: 300
+      containerConcurrency: 80
+      containers:
+        - image: gcr.io/PROJECT_ID/kineticz:latest
+          ports:
+            - name: http1
+              containerPort: 8080
+          resources:
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+          env:
+            - name: PORT
+              value: "8080"
+            - name: MONGO_URI
+              valueFrom:
+                secretKeyRef:
+                  name: kineticz-mongo-uri
+                  key: latest
+            - name: GEMINI_PROJECT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: kineticz-gemini-project-id
+                  key: latest
+            - name: GEMINI_LOCATION
+              value: us-central1
+            - name: GITLAB_URL
+              value: https://gitlab.com
+            - name: GITLAB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: kineticz-gitlab-token
+                  key: latest
+            - name: GITLAB_PROJECT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: kineticz-gitlab-project-id
+                  key: latest
+            - name: ARIZE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: kineticz-arize-url
+                  key: latest
+            - name: ARIZE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kineticz-arize-api-key
+                  key: latest
+            - name: ELASTIC_URL
+              valueFrom:
+                secretKeyRef:
+                  name: kineticz-elastic-url
+                  key: latest
+            - name: DYNATRACE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: kineticz-dynatrace-url
+                  key: latest
+            - name: DYNATRACE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: kineticz-dynatrace-token
+                  key: latest
+            - name: FIVETRAN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: kineticz-fivetran-secret
+                  key: latest
+  traffic:
+    - percent: 100
+      latestRevision: true
