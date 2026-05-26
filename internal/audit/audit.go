@@ -16,6 +16,7 @@ type Entry struct {
 	CorrelationToken corr.CorrelationToken
 	Action           string
 	Payload          []byte
+	Thought          string
 	PreviousHash     []byte
 	Hash             []byte
 	Ed25519Signature []byte
@@ -33,6 +34,7 @@ func computeHash(e *Entry) []byte {
 	h.Write(e.PreviousHash)
 	h.Write([]byte(e.Action))
 	h.Write(e.Payload)
+	h.Write([]byte(e.Thought))
 	h.Write([]byte(e.Timestamp.UTC().Format(time.RFC3339Nano)))
 	return h.Sum(nil)
 }

@@ -20,6 +20,7 @@ func buildChain(t *testing.T, n int, priv ed25519.PrivateKey) []Entry {
 			CorrelationToken: corr.New(),
 			Action:           "TEST_ACTION",
 			Payload:          []byte(fmt.Sprintf("payload-%d", i)),
+			Thought:          fmt.Sprintf("reasoning step %d: observed signal, chose path A", i),
 			PreviousHash:     prev,
 			Timestamp:        time.Unix(1700000000+int64(i), 0).UTC(),
 		}
@@ -59,6 +60,11 @@ func TestChainAndVerify(t *testing.T) {
 		{
 			name:    "tampered payload",
 			mutate:  func(c []Entry) { c[2].Payload = []byte("forged") },
+			wantErr: ErrHashMismatch,
+		},
+		{
+			name:    "tampered thought",
+			mutate:  func(c []Entry) { c[2].Thought = "fabricated reasoning" },
 			wantErr: ErrHashMismatch,
 		},
 		{
