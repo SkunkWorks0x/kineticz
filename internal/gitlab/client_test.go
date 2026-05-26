@@ -129,6 +129,44 @@ func TestCreateMR_PrependsCorrelationTokenAndPathHasMR(t *testing.T) {
 	}
 }
 
+func TestGetFileContent_HappyPath(t *testing.T) {
+	const wantContent = "package pipeline\n\nfunc Foo() {}\n"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.URL.Path, "/repository/files/") {
+			http.Error(w, "wrong path", http.StatusNotFound)
+			return
+		}
+		if r.URL.Query().Get("ref") != "main" {
+			http.Error(w, "wrong ref", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"encoding":"base64","content":"cGFja2FnZSBwaXBlbGluZQoKZnVuYyBGb28oKSB7fQo="}`))
+	}))
+	defer server.Close()
+	c := newTestClient(server)
+	got, err := c.GetFileContent(context.Background(), "kineticz/pipelines", "internal/pipeline/users.go", "main")
+	if err != nil {
+		t.Fatalf("GetFileContent: %v", err)
+	}
+	if string(got) != wantContent {
+		t.Errorf("content = %q, want %q", got, wantContent)
+	}
+}
+
+func TestGetFileContent_404ReturnsErrFileNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"404 File Not Found"}`))
+	}))
+	defer server.Close()
+	c := newTestClient(server)
+	_, err := c.GetFileContent(context.Background(), "x/y", "missing.go", "main")
+	if !errors.Is(err, ErrFileNotFound) {
+		t.Fatalf("err = %v, want ErrFileNotFound", err)
+	}
+}
+
 func TestGitLabClient_5xxExhaustsRetries(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)

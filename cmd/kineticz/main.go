@@ -228,15 +228,18 @@ func runPipeline(ctx context.Context, d Deps, anomaly fivetran.Anomaly) {
 	_ = d.Audit.Append(ctx, "PIPELINE_COMPLETE", payload)
 }
 
-// fsReader is a TargetReader rooted at a local directory. Production should
-// substitute a GitLab-backed reader; this implementation is for demo runs
-// where the source repository is checked out locally.
-type fsReader struct {
-	root string
+// gitlabFileReader implements repair.TargetReader against the GitLab
+// repository-files API, reading the latest content of FilePath at TargetBranch.
+// This replaces the demo-only fsReader so the orchestrator sees the same
+// source-of-truth bytes that GitLab will accept on commit.
+type gitlabFileReader struct {
+	gl           gitlab.Client
+	projectID    string
+	targetBranch string
 }
 
-func (f *fsReader) Read(_ context.Context, path string) ([]byte, error) {
-	return os.ReadFile(filepath.Join(f.root, path))
+func (g *gitlabFileReader) Read(ctx context.Context, path string) ([]byte, error) {
+	return g.gl.GetFileContent(ctx, g.projectID, path, g.targetBranch)
 }
 
 type config struct {
@@ -258,7 +261,6 @@ type config struct {
 	DynatraceToken     string
 	FivetranSecret     string
 	Ed25519SeedHex     string
-	TargetRoot         string
 }
 
 func loadConfig() (config, error) {
@@ -281,7 +283,6 @@ func loadConfig() (config, error) {
 		DynatraceToken:     os.Getenv("DYNATRACE_TOKEN"),
 		FivetranSecret:     os.Getenv("FIVETRAN_SECRET"),
 		Ed25519SeedHex:     os.Getenv("KINETICZ_ED25519_SEED"),
-		TargetRoot:         getenv("TARGET_ROOT", "."),
 	}
 
 	missing := []string{}
@@ -325,7 +326,6 @@ func logStartup(cfg config) {
 	log.Printf("  gitlab=%s project=%s target_branch=%s", cfg.GitLabURL, cfg.GitLabProjectID, cfg.GitLabTargetBranch)
 	log.Printf("  arize=%s rubric=%s", cfg.ArizeURL, cfg.ArizeRubricID)
 	log.Printf("  elastic=%s dynatrace=%s", cfg.ElasticURL, cfg.DynatraceURL)
-	log.Printf("  target_root=%s", cfg.TargetRoot)
 	log.Println("------------------------")
 }
 
@@ -370,7 +370,11 @@ func buildDeps(ctx context.Context, cfg config) (Deps, func(), error) {
 	gitlabClient := gitlab.NewHTTPClient(httpDefault, cfg.GitLabURL, cfg.GitLabToken)
 	geminiClient := gemini.NewVertexClient(httpDefault, writer, cfg.GeminiProjectID, cfg.GeminiLocation, cfg.GeminiModel, envTokenFunc)
 
-	target := &fsReader{root: cfg.TargetRoot}
+	target := &gitlabFileReader{
+		gl:           gitlabClient,
+		projectID:    cfg.GitLabProjectID,
+		targetBranch: cfg.GitLabTargetBranch,
+	}
 
 	diagnoseEngine := diagnose.New(elasticClient, dynatraceClient, writer)
 	repairCoord := repair.New(geminiClient, writer, target)

@@ -3,6 +3,7 @@ package gitlab
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,13 +15,16 @@ import (
 	"github.com/skunkworks0x/kineticz/internal/httputil"
 )
 
-// Client exposes the two GitLab REST operations the commit orchestrator
-// needs. They are split so the orchestrator can audit COMMIT_OK and
-// MR_CREATED separately and recover from MR creation failure without
-// re-pushing the commit.
+// Client exposes the GitLab REST operations Kineticz needs. CreateCommit and
+// CreateMR are split so the commit orchestrator can audit each separately
+// and recover from MR creation failure without re-pushing the commit.
+// GetFileContent fetches the current contents of a file at a branch ref;
+// the orchestrator uses it as the TargetReader source so the patched file
+// is computed against the same content GitLab will accept.
 type Client interface {
 	CreateCommit(ctx context.Context, req CommitRequest) (string, error)
 	CreateMR(ctx context.Context, req MRRequest) (*MRResult, error)
+	GetFileContent(ctx context.Context, projectID, filePath, ref string) ([]byte, error)
 }
 
 // CommitRequest creates a single-file commit on SourceBranch, branching from
@@ -67,6 +71,9 @@ var (
 	ErrGitLabUnavailable = errors.New("gitlab: service unavailable")
 	ErrMergeConflict     = errors.New("gitlab: merge conflict")
 )
+
+// ErrFileNotFound signals a 404 from the repository-files endpoint.
+var ErrFileNotFound = errors.New("gitlab: file not found at ref")
 
 type httpClient struct {
 	http    *http.Client
@@ -154,6 +161,42 @@ func (c *httpClient) CreateMR(ctx context.Context, req MRRequest) (*MRResult, er
 		return nil, fmt.Errorf("gitlab: decode MR response: %w", err)
 	}
 	return &MRResult{MRIID: resp.IID, MRURL: resp.WebURL}, nil
+}
+
+// GetFileContent fetches the contents of filePath in projectID at the given
+// ref. GitLab returns the content base64-encoded; this method decodes before
+// returning. Returns ErrFileNotFound on 404.
+func (c *httpClient) GetFileContent(ctx context.Context, projectID, filePath, ref string) ([]byte, error) {
+	path := fmt.Sprintf("/api/v4/projects/%s/repository/files/%s?ref=%s",
+		url.PathEscape(projectID),
+		url.PathEscape(filePath),
+		url.QueryEscape(ref),
+	)
+	rb, status, err := c.do(ctx, http.MethodGet, path, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusNotFound {
+		return nil, fmt.Errorf("%w: %s @ %s", ErrFileNotFound, filePath, ref)
+	}
+	if status >= 400 {
+		return nil, &GitLabError{StatusCode: status, Body: string(rb)}
+	}
+	var resp struct {
+		Encoding string `json:"encoding"`
+		Content  string `json:"content"`
+	}
+	if err := json.Unmarshal(rb, &resp); err != nil {
+		return nil, fmt.Errorf("gitlab: decode file response: %w", err)
+	}
+	if resp.Encoding != "base64" {
+		return nil, fmt.Errorf("gitlab: unexpected file encoding %q (want base64)", resp.Encoding)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(resp.Content)
+	if err != nil {
+		return nil, fmt.Errorf("gitlab: decode base64 content: %w", err)
+	}
+	return decoded, nil
 }
 
 func (c *httpClient) do(ctx context.Context, method, path string, body []byte, correlationToken string) ([]byte, int, error) {
