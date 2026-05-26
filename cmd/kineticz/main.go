@@ -19,9 +19,12 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 
 	"github.com/skunkworks0x/kineticz/internal/arize"
 	"github.com/skunkworks0x/kineticz/internal/audit"
+	"github.com/skunkworks0x/kineticz/internal/corr"
 	auditmongo "github.com/skunkworks0x/kineticz/internal/audit/mongodb"
 	"github.com/skunkworks0x/kineticz/internal/commit"
 	"github.com/skunkworks0x/kineticz/internal/dynatrace"
@@ -147,7 +150,21 @@ func pubkeyHandler(pub ed25519.PublicKey) http.HandlerFunc {
 
 func runPipeline(ctx context.Context, d Deps, anomaly fivetran.Anomaly) {
 	eventID := anomaly.EventID()
+
+	ctx, span := arize.Tracer().Start(ctx, "kineticz.pipeline")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("kineticz.event_id", eventID),
+		attribute.String("kineticz.connector_id", anomaly.ConnectorID),
+		attribute.String("kineticz.event_type", anomaly.Event),
+	)
+	if tok, ok := corr.FromContext(ctx); ok {
+		span.SetAttributes(attribute.String("kineticz.correlation_token", string(tok)))
+	}
+
 	fail := func(stage string, err error) {
+		span.SetStatus(codes.Error, stage+": "+err.Error())
+		span.RecordError(err)
 		payload, _ := json.Marshal(map[string]any{
 			"event_id": eventID,
 			"stage":    stage,

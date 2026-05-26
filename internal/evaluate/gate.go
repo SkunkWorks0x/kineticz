@@ -53,7 +53,7 @@ func (g *Gate) Evaluate(ctx context.Context, orig, patched, diff []byte) (*Resul
 	sha := diffSHA(diff)
 	res := &Result{DiffSHA: sha}
 
-	ctx, span := arize.Tracer().Start(ctx, "evaluate")
+	ctx, span := arize.Tracer().Start(ctx, "kineticz.evaluate")
 	span.SetAttributes(attribute.String("diff.sha256", sha))
 	defer span.End()
 
