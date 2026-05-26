@@ -190,6 +190,68 @@ func TestDiagnose(t *testing.T) {
 	}
 }
 
+func TestDiagnosisResult_Validate(t *testing.T) {
+	cases := []struct {
+		name      string
+		r         *DiagnosisResult
+		wantErrIs error
+	}{
+		{
+			name: "valid_with_health",
+			r: &DiagnosisResult{
+				ContractContext:  &elastic.ContractContext{},
+				ConsumerHealth:   []dynatrace.ConsumerHealth{},
+				CorrelationToken: "tok",
+			},
+			wantErrIs: nil,
+		},
+		{
+			name: "valid_degraded_nil_health_allowed",
+			r: &DiagnosisResult{
+				ContractContext:  &elastic.ContractContext{},
+				Degraded:         true,
+				CorrelationToken: "tok",
+			},
+			wantErrIs: nil,
+		},
+		{
+			name:      "nil_ContractContext",
+			r:         &DiagnosisResult{CorrelationToken: "tok", ConsumerHealth: []dynatrace.ConsumerHealth{}},
+			wantErrIs: ErrNilContractContext,
+		},
+		{
+			name: "empty_CorrelationToken",
+			r: &DiagnosisResult{
+				ContractContext: &elastic.ContractContext{},
+				ConsumerHealth:  []dynatrace.ConsumerHealth{},
+			},
+			wantErrIs: ErrEmptyCorrelationToken,
+		},
+		{
+			name: "non_degraded_nil_ConsumerHealth_rejected",
+			r: &DiagnosisResult{
+				ContractContext:  &elastic.ContractContext{},
+				CorrelationToken: "tok",
+			},
+			wantErrIs: ErrMissingHealthInNonDegradedMode,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.r.Validate()
+			if tc.wantErrIs == nil {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, tc.wantErrIs) {
+				t.Fatalf("err = %v, want errors.Is(%v)", err, tc.wantErrIs)
+			}
+		})
+	}
+}
+
 func TestDiagnose_Timeout(t *testing.T) {
 	slowEs := &elastic.Mock{
 		LookupContractFn: func(ctx context.Context, _ elastic.ContractQuery) (*elastic.ContractContext, error) {

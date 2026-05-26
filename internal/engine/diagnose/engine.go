@@ -26,6 +26,33 @@ type DiagnosisResult struct {
 	CorrelationToken corr.CorrelationToken
 }
 
+// Validation errors. DiagnosisResult crosses the engine boundary into repair
+// and evaluate, so it gets the boundary-validation treatment from CLAUDE.md.
+var (
+	ErrNilContractContext             = errors.New("diagnose: ContractContext is required")
+	ErrEmptyCorrelationToken          = errors.New("diagnose: CorrelationToken is empty")
+	ErrMissingHealthInNonDegradedMode = errors.New("diagnose: ConsumerHealth required when not Degraded")
+)
+
+// Validate confirms r is well-formed before crossing the engine boundary into
+// downstream stages. Returns a wrapped sentinel error per failure mode so
+// callers can branch with errors.Is.
+func (r *DiagnosisResult) Validate() error {
+	if r == nil {
+		return fmt.Errorf("diagnose: result is nil")
+	}
+	if r.ContractContext == nil {
+		return ErrNilContractContext
+	}
+	if r.CorrelationToken == "" {
+		return ErrEmptyCorrelationToken
+	}
+	if !r.Degraded && r.ConsumerHealth == nil {
+		return ErrMissingHealthInNonDegradedMode
+	}
+	return nil
+}
+
 // Engine fans Elastic + Dynatrace out in parallel under a Partial Success
 // Policy. Elastic failure is a hard fail (no diagnosis without a contract);
 // Dynatrace ErrTelemetryUnavailable is a soft fail (continue with Degraded).

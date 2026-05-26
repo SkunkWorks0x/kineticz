@@ -63,11 +63,19 @@ func (w *Writer) LoadHead(ctx context.Context, pub ed25519.PublicKey) (*audit.En
 	return head, nil
 }
 
-// Append implements audit.Writer. It opens a transaction, reads the current
-// chain head, builds and signs a new entry chained to that head, and inserts
-// it. Concurrent Appends within the same process are serialized by mu;
-// concurrent Appends across processes are ordered by the store's transaction.
+// Append implements audit.Writer. Delegates to AppendWithThought with an
+// empty thought; non-AI callers (elastic, dynatrace, diagnose engine) use
+// this overload.
 func (w *Writer) Append(ctx context.Context, action string, payload []byte) error {
+	return w.AppendWithThought(ctx, action, payload, "")
+}
+
+// AppendWithThought implements audit.ThoughtWriter. It opens a transaction,
+// reads the current chain head, builds and signs a new entry chained to that
+// head with the Gemini reasoning block populated, and inserts it. Concurrent
+// Appends within the same process are serialized by mu; concurrent Appends
+// across processes are ordered by the store's transaction.
+func (w *Writer) AppendWithThought(ctx context.Context, action string, payload []byte, thought string) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -83,6 +91,7 @@ func (w *Writer) Append(ctx context.Context, action string, payload []byte) erro
 			CorrelationToken: token,
 			Action:           action,
 			Payload:          payload,
+			Thought:          thought,
 			Timestamp:        time.Now().UTC(),
 		}
 		if prev != nil {
