@@ -146,22 +146,23 @@ func pubkeyHandler(pub ed25519.PublicKey) http.HandlerFunc {
 }
 
 func runPipeline(ctx context.Context, d Deps, anomaly fivetran.Anomaly) {
+	eventID := anomaly.EventID()
 	fail := func(stage string, err error) {
 		payload, _ := json.Marshal(map[string]any{
-			"event_id": anomaly.EventID,
+			"event_id": eventID,
 			"stage":    stage,
 			"error":    err.Error(),
 		})
 		_ = d.Audit.Append(ctx, "PIPELINE_FAILED", payload)
 	}
 
-	columns := make([]string, 0, len(anomaly.ColumnChanges))
-	for _, ch := range anomaly.ColumnChanges {
-		columns = append(columns, ch.Column)
-	}
-	contractName := anomaly.SchemaName + "/" + anomaly.TableName
+	// Real Fivetran webhooks don't carry column-level diffs. Diagnose runs
+	// against the connector identity; richer column hints will come from
+	// Dynatrace/Elastic side channels in a later phase.
+	columns := []string{}
+	contractName := anomaly.ConnectorType + "/" + anomaly.ConnectorName
 	syncEndMs := time.Now().UnixMilli()
-	syncStartMs := anomaly.Timestamp.UnixMilli()
+	syncStartMs := anomaly.Created.UnixMilli()
 
 	diag, err := d.Diagnose.Diagnose(ctx, elastic.ContractQuery{
 		ContractName:  contractName,
@@ -177,7 +178,7 @@ func runPipeline(ctx context.Context, d Deps, anomaly fivetran.Anomaly) {
 		return
 	}
 
-	targetPath := filepath.Join("internal", "pipeline", anomaly.TableName+".go")
+	targetPath := filepath.Join("internal", "pipeline", anomaly.ConnectorName+".go")
 
 	repairRes, err := d.Repair.Repair(ctx, diag, targetPath)
 	if err != nil {
@@ -213,8 +214,8 @@ func runPipeline(ctx context.Context, d Deps, anomaly fivetran.Anomaly) {
 		FilePath:      targetPath,
 		FileContent:   patched,
 		CommitMessage: "Kineticz auto-patch: " + contractName,
-		MRTitle:       "Auto-patch " + anomaly.TableName + " schema drift",
-		MRDescription: fmt.Sprintf("Anomaly %s triggered by upstream schema change.\n\nDiff:\n```\n%s\n```\n", anomaly.EventID, repairRes.PatchDiff),
+		MRTitle:       "Auto-patch " + anomaly.ConnectorName + " schema drift",
+		MRDescription: fmt.Sprintf("Anomaly %s triggered by upstream schema change.\n\nDiff:\n```\n%s\n```\n", eventID, repairRes.PatchDiff),
 	})
 	if err != nil {
 		fail("commit", err)
@@ -222,7 +223,7 @@ func runPipeline(ctx context.Context, d Deps, anomaly fivetran.Anomaly) {
 	}
 
 	payload, _ := json.Marshal(map[string]any{
-		"event_id":   anomaly.EventID,
+		"event_id":   eventID,
 		"mr_iid":     mr.MRIID,
 		"mr_url":     mr.MRURL,
 		"commit_sha": mr.CommitSHA,
@@ -256,9 +257,8 @@ type config struct {
 	GitLabToken        string
 	GitLabProjectID    string
 	GitLabTargetBranch string
-	ArizeURL           string
-	ArizeAPIKey        string
-	ArizeRubricID      string
+	PhoenixEndpoint    string
+	PhoenixAPIKey      string
 	ElasticURL         string
 	DynatraceURL       string
 	DynatraceToken     string
@@ -278,9 +278,8 @@ func loadConfig() (config, error) {
 		GitLabToken:        os.Getenv("GITLAB_TOKEN"),
 		GitLabProjectID:    os.Getenv("GITLAB_PROJECT_ID"),
 		GitLabTargetBranch: getenv("GITLAB_TARGET_BRANCH", "main"),
-		ArizeURL:           os.Getenv("ARIZE_URL"),
-		ArizeAPIKey:        os.Getenv("ARIZE_API_KEY"),
-		ArizeRubricID:      getenv("ARIZE_RUBRIC_ID", "kineticz-patch-rubric"),
+		PhoenixEndpoint:    os.Getenv("PHOENIX_COLLECTOR_ENDPOINT"),
+		PhoenixAPIKey:      os.Getenv("PHOENIX_API_KEY"),
 		ElasticURL:         os.Getenv("ELASTIC_URL"),
 		DynatraceURL:       os.Getenv("DYNATRACE_URL"),
 		DynatraceToken:     os.Getenv("DYNATRACE_TOKEN"),
@@ -295,9 +294,9 @@ func loadConfig() (config, error) {
 		"GITLAB_URL":            cfg.GitLabURL,
 		"GITLAB_TOKEN":          cfg.GitLabToken,
 		"GITLAB_PROJECT_ID":     cfg.GitLabProjectID,
-		"ARIZE_URL":             cfg.ArizeURL,
-		"ARIZE_API_KEY":         cfg.ArizeAPIKey,
-		"ELASTIC_URL":           cfg.ElasticURL,
+		"PHOENIX_COLLECTOR_ENDPOINT": cfg.PhoenixEndpoint,
+		"PHOENIX_API_KEY":            cfg.PhoenixAPIKey,
+		"ELASTIC_URL":                cfg.ElasticURL,
 		"DYNATRACE_URL":         cfg.DynatraceURL,
 		"FIVETRAN_SECRET":       cfg.FivetranSecret,
 		"KINETICZ_ED25519_SEED": cfg.Ed25519SeedHex,
@@ -332,8 +331,7 @@ func logStartup(cfg config) {
 		"gitlab_url", cfg.GitLabURL,
 		"gitlab_project", cfg.GitLabProjectID,
 		"gitlab_target_branch", cfg.GitLabTargetBranch,
-		"arize_url", cfg.ArizeURL,
-		"arize_rubric", cfg.ArizeRubricID,
+		"phoenix_endpoint", cfg.PhoenixEndpoint,
 		"elastic_url", cfg.ElasticURL,
 		"dynatrace_url", cfg.DynatraceURL,
 	)
@@ -344,9 +342,16 @@ func buildDeps(ctx context.Context, cfg config) (Deps, func(), error) {
 	if err != nil {
 		return Deps{}, nil, fmt.Errorf("mongo connect: %w", err)
 	}
+	_, traceShutdown, err := arize.NewTracerProvider(ctx, cfg.PhoenixEndpoint, cfg.PhoenixAPIKey)
+	if err != nil {
+		_ = mongoClient.Disconnect(context.Background())
+		return Deps{}, nil, fmt.Errorf("arize tracer provider: %w", err)
+	}
+
 	cleanup := func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		_ = traceShutdown(shutdownCtx)
 		_ = mongoClient.Disconnect(shutdownCtx)
 	}
 
@@ -376,7 +381,6 @@ func buildDeps(ctx context.Context, cfg config) (Deps, func(), error) {
 	httpDefault := http.DefaultClient
 	elasticClient := elastic.NewClient(httpDefault, writer, cfg.ElasticURL)
 	dynatraceClient := dynatrace.NewClient(httpDefault, writer, cfg.DynatraceURL)
-	arizeClient := arize.NewHTTPClient(httpDefault, cfg.ArizeURL, cfg.ArizeAPIKey, cfg.ArizeRubricID)
 	gitlabClient := gitlab.NewHTTPClient(httpDefault, cfg.GitLabURL, cfg.GitLabToken)
 	geminiClient := gemini.NewVertexClient(httpDefault, writer, cfg.GeminiProjectID, cfg.GeminiLocation, cfg.GeminiModel, envTokenFunc)
 
@@ -388,7 +392,7 @@ func buildDeps(ctx context.Context, cfg config) (Deps, func(), error) {
 
 	diagnoseEngine := diagnose.New(elasticClient, dynatraceClient, writer)
 	repairCoord := repair.New(geminiClient, writer, target)
-	evalGate := evaluate.New(arizeClient, writer, noopIndexer{})
+	evalGate := evaluate.New(writer, noopIndexer{})
 	commitCoord := commit.New(gitlabClient, writer)
 
 	return Deps{

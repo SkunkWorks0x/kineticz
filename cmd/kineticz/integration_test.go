@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/skunkworks0x/kineticz/internal/arize"
 	"github.com/skunkworks0x/kineticz/internal/audit"
 	"github.com/skunkworks0x/kineticz/internal/commit"
 	"github.com/skunkworks0x/kineticz/internal/dynatrace"
@@ -29,7 +28,7 @@ import (
 
 const intSecret = "integration-secret"
 
-const intWebhookBody = `{"event_id":"int_evt_1","event_type":"schema_change","schema_name":"users_schema","table_name":"users","column_changes":[{"column":"created_at","action":"added","new_type":"timestamp"}],"timestamp":"2026-05-26T10:00:00Z"}`
+const intWebhookBody = `{"event":"sync_end","created":"2026-05-26T10:00:00.000Z","connector_type":"postgres","connector_id":"conn_int","connector_name":"users","sync_id":"syn_int","destination_group_id":"warehouse_main","data":{"status":"FAILURE_WITH_TASK"}}`
 
 const intOrigFile = "package pipeline\n\nfunc Greeting(name string) string {\n\tgreet := \"Hello\"\n\treturn greet + \", \" + name\n}\n"
 
@@ -119,11 +118,6 @@ func TestFullPipeline_HappyPath(t *testing.T) {
 			}}}, nil
 		},
 	}
-	azMock := &arize.Mock{
-		EvaluateFn: func(context.Context, arize.EvaluateRequest) (*arize.EvaluateResponse, error) {
-			return &arize.EvaluateResponse{Pass: true, Rationale: "ok"}, nil
-		},
-	}
 	glMock := &gitlab.Mock{
 		CreateCommitFn: func(context.Context, gitlab.CommitRequest) (string, error) {
 			return "sha-integration", nil
@@ -138,7 +132,7 @@ func TestFullPipeline_HappyPath(t *testing.T) {
 		Audit:          store,
 		Diagnose:       diagnose.New(esMock, dtMock, store),
 		Repair:         repair.New(gMock, store, &stubTarget{content: []byte(intOrigFile)}),
-		Evaluate:       evaluate.New(azMock, store, intIndexer{}),
+		Evaluate:       evaluate.New(store, intIndexer{}),
 		Commit:         commit.New(glMock, store),
 		Target:         &stubTarget{content: []byte(intOrigFile)},
 		ProjectID:      "kineticz/pipelines",
@@ -189,7 +183,7 @@ done:
 		t.Errorf("last action = %s, want PIPELINE_COMPLETE", actions[len(actions)-1])
 	}
 	// Required stages appeared.
-	want := []string{"DIAGNOSIS_OK", "REPAIR_APPROVED", "EVALUATE_ARIZE_PASS", "COMMIT_OK", "MR_CREATED"}
+	want := []string{"DIAGNOSIS_OK", "REPAIR_APPROVED", "EVALUATE_PASS", "COMMIT_OK", "MR_CREATED"}
 	for _, w := range want {
 		found := false
 		for _, a := range actions {
