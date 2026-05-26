@@ -1,0 +1,9 @@
+{
+  "state": "SUCCEEDED",
+  "result": {
+    "records": [
+      {"consumer": "service-a", "error_rate": 0.05, "latency_p95_ms": 120.5},
+      {"consumer": "service-b", "error_rate": 0.0, "latency_p95_ms": 95.2}
+    ]
+  }
+}

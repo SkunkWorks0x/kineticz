@@ -1,0 +1,40 @@
+{
+  "took": 8,
+  "timed_out": false,
+  "hits": {
+    "total": {"value": 14, "relation": "eq"},
+    "max_score": null,
+    "hits": [
+      {
+        "_index": "mitigations",
+        "_id": "diff-001",
+        "_score": 0.032520326,
+        "_rank": 1,
+        "_source": {
+          "summary": "Add nullable timestamp column with default NULL",
+          "diff_id": "diff-001"
+        }
+      },
+      {
+        "_index": "mitigations",
+        "_id": "diff-002",
+        "_score": 0.029858906,
+        "_rank": 2,
+        "_source": {
+          "summary": "Rename email column with backfill view",
+          "diff_id": "diff-002"
+        }
+      },
+      {
+        "_index": "mitigations",
+        "_id": "diff-003",
+        "_score": 0.024108626,
+        "_rank": 3,
+        "_source": {
+          "summary": "Split full_name into first_name and last_name",
+          "diff_id": "diff-003"
+        }
+      }
+    ]
+  }
+}

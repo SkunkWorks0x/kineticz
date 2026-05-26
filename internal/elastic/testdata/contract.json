@@ -1,0 +1,10 @@
+{
+  "_index": "contracts",
+  "_id": "users_v1",
+  "_version": 3,
+  "found": true,
+  "_source": {
+    "name": "users_v1",
+    "yaml": "name: users_v1\nversion: 1\ncolumns:\n  - id: bigint\n  - email: string\n  - created_at: timestamp\n"
+  }
+}
