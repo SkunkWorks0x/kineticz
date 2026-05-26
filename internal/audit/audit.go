@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/skunkworks0x/kineticz/internal/corr"
@@ -29,14 +31,35 @@ var (
 	ErrBadSignature = errors.New("audit: invalid signature")
 )
 
+// CanonicalFields documents the field order used by CanonicalBytes and thus
+// the SHA-256 hash. Reordering invalidates every stored hash and signature.
+var CanonicalFields = []string{"PreviousHash", "Action", "Payload", "Thought", "Timestamp"}
+
+// CanonicalBytes returns the deterministic byte representation hashed by
+// computeHash. Fields are written in CanonicalFields order with 8-byte
+// big-endian length prefixes; length-prefixing prevents adjacent-field
+// boundary collisions (e.g., Action="foo" Payload="bar" cannot hash-collide
+// with Action="foob" Payload="ar").
+func (e *Entry) CanonicalBytes() []byte {
+	var buf bytes.Buffer
+	writeLengthPrefixed(&buf, e.PreviousHash)
+	writeLengthPrefixed(&buf, []byte(e.Action))
+	writeLengthPrefixed(&buf, e.Payload)
+	writeLengthPrefixed(&buf, []byte(e.Thought))
+	writeLengthPrefixed(&buf, []byte(e.Timestamp.UTC().Format(time.RFC3339Nano)))
+	return buf.Bytes()
+}
+
+func writeLengthPrefixed(w io.Writer, b []byte) {
+	var sz [8]byte
+	binary.BigEndian.PutUint64(sz[:], uint64(len(b)))
+	_, _ = w.Write(sz[:])
+	_, _ = w.Write(b)
+}
+
 func computeHash(e *Entry) []byte {
-	h := sha256.New()
-	h.Write(e.PreviousHash)
-	h.Write([]byte(e.Action))
-	h.Write(e.Payload)
-	h.Write([]byte(e.Thought))
-	h.Write([]byte(e.Timestamp.UTC().Format(time.RFC3339Nano)))
-	return h.Sum(nil)
+	sum := sha256.Sum256(e.CanonicalBytes())
+	return sum[:]
 }
 
 func Chain(e *Entry, priv ed25519.PrivateKey) {
