@@ -14,13 +14,15 @@ Kineticz is an orchestration engine that detects broken data pipelines, diagnose
 6. **Audit**: MongoDB Atlas stores the result. Each entry is hash-chained and Ed25519-signed.
 
 ### External Services
-| Service          | Role                        | Integration Pattern           |
-|------------------|-----------------------------|-------------------------------|
-| Gemini 3.5 Flash | AI routing + patch generation | Parallel tool calls via API   |
-| Dynatrace        | Live telemetry               | Pull metrics on failure events|
-| Elastic          | Historical pipeline memory   | Query past failures + fixes   |
-| Arize            | Deterministic safety gate    | Boolean rubric evaluation     |
-| MongoDB Atlas    | Tamper-evident audit log     | Hash-chained, Ed25519-signed  |
+| Service          | Role                                          | Integration Pattern             |
+|------------------|-----------------------------------------------|---------------------------------|
+| Fivetran         | Source ingestion                              | Managed connectors              |
+| Dynatrace        | Live telemetry                                | Pull metrics on failure events  |
+| Gemini 3.5 Flash | AI routing + patch generation                 | Parallel tool calls via API     |
+| Elastic          | Historical memory via Reciprocal Rank Fusion  | Query past failures + fixes     |
+| Arize            | Deterministic safety gate                     | Boolean rubric evaluation       |
+| GitLab           | Unified diff patch application                | Commit patches via API          |
+| MongoDB Atlas    | State machine + tamper-evident audit ledger   | Hash-chained, Ed25519-signed    |
 
 ### Key Design Constraints
 - **Deterministic gating**: Arize rubric returns true or false. No probability thresholds, no "confidence scores."
@@ -36,10 +38,11 @@ Kineticz is an orchestration engine that detects broken data pipelines, diagnose
 ### Data Flow
 ```
 Pipeline Failure
-    → Dynatrace alert
-    → Gemini 3.5 Flash (parallel: Dynatrace metrics + Elastic history)
-    → Candidate patch
+    → Fivetran flags ingestion anomaly
+    → Dynatrace correlates APM + business events
+    → Gemini 3.5 Flash (parallel: Dynatrace metrics + Elastic RRF history)
+    → Candidate unified diff patch
     → Arize boolean rubric
-    → [PASS] Apply patch + write audit entry
-    → [FAIL] Log rejection + alert operator
+    → [PASS] GitLab commits patch via API + MongoDB Atlas writes signed audit entry
+    → [FAIL] MongoDB Atlas logs rejection + alert operator
 ```

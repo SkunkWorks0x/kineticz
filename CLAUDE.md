@@ -15,7 +15,7 @@
 ## Mission Identity
 - Project Name: **Kineticz**
 - Identity: High-performance, deterministic DataOps orchestration.
-- Stack: Gemini 3.5 Flash (routing), Dynatrace (telemetry), Elastic (memory), Arize (gating), MongoDB Atlas (audit)
+- Stack: Gemini 3.5 Flash (routing + patch gen), Fivetran (ingestion), Dynatrace (APM + event correlation), Elastic (RAG via RRF), Arize (boolean rubric gate), GitLab (unified diff patch application), MongoDB Atlas (state machine + hash-chained Ed25519 audit ledger)
 
 ## Writing & Communication (Anti-Slop)
 All prose — comments, docs, commit messages, READMEs, error messages, CLI output — must follow these rules:
