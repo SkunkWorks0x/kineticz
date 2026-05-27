@@ -50,15 +50,15 @@ spec:
                 secretKeyRef:
                   name: kineticz-gitlab-project-id
                   key: latest
-            - name: ARIZE_URL
+            - name: PHOENIX_COLLECTOR_ENDPOINT
               valueFrom:
                 secretKeyRef:
-                  name: kineticz-arize-url
+                  name: kineticz-phoenix-endpoint
                   key: latest
-            - name: ARIZE_API_KEY
+            - name: PHOENIX_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: kineticz-arize-api-key
+                  name: kineticz-phoenix-api-key
                   key: latest
             - name: ELASTIC_URL
               valueFrom:
@@ -79,6 +79,16 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: kineticz-fivetran-secret
+                  key: latest
+            - name: KINETICZ_ED25519_SEED
+              valueFrom:
+                secretKeyRef:
+                  name: kineticz-ed25519-seed
+                  key: latest
+            - name: GOOGLE_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: kineticz-google-access-token
                   key: latest
   traffic:
     - percent: 100

@@ -2,7 +2,7 @@ package main
 
 import (
 	"crypto/ed25519"
-	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +23,7 @@ func TestPubkeyHandler(t *testing.T) {
 	}
 	var body struct {
 		Algorithm string `json:"algorithm"`
+		Encoding  string `json:"encoding"`
 		PublicKey string `json:"public_key"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
@@ -31,9 +32,12 @@ func TestPubkeyHandler(t *testing.T) {
 	if body.Algorithm != "ed25519" {
 		t.Errorf("algorithm = %q, want ed25519", body.Algorithm)
 	}
-	decoded, err := base64.StdEncoding.DecodeString(body.PublicKey)
+	if body.Encoding != "hex" {
+		t.Errorf("encoding = %q, want hex", body.Encoding)
+	}
+	decoded, err := hex.DecodeString(body.PublicKey)
 	if err != nil {
-		t.Fatalf("decode public_key base64: %v", err)
+		t.Fatalf("decode public_key hex: %v", err)
 	}
 	if string(decoded) != string(pub) {
 		t.Errorf("decoded public key does not match input")

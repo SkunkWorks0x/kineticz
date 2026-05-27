@@ -54,6 +54,7 @@ func newTestClient(t *testing.T, baseURL string, aw *recordingAudit) *client {
 		http:    http.DefaultClient,
 		audit:   aw,
 		baseURL: baseURL,
+		token:   "test-dt-token",
 		backoff: 1 * time.Millisecond,
 		retries: 3,
 	}

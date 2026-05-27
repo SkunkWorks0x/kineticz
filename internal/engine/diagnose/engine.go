@@ -110,6 +110,7 @@ func (e *Engine) Diagnose(ctx context.Context, q elastic.ContractQuery, syncStar
 	go func() {
 		cctx, cspan := arize.Tracer().Start(timeoutCtx, "elastic.lookup_contract")
 		defer cspan.End()
+		cspan.SetAttributes(attribute.String("kineticz.correlation_token", string(token)))
 		cc, err := e.elastic.LookupContract(cctx, q)
 		if err != nil {
 			cspan.SetStatus(codes.Error, err.Error())
@@ -120,6 +121,7 @@ func (e *Engine) Diagnose(ctx context.Context, q elastic.ContractQuery, syncStar
 	go func() {
 		cctx, cspan := arize.Tracer().Start(timeoutCtx, "dynatrace.query_consumer_health")
 		defer cspan.End()
+		cspan.SetAttributes(attribute.String("kineticz.correlation_token", string(token)))
 		ch, err := e.dynatrace.QueryConsumerHealth(cctx, syncStartMs, syncEndMs)
 		if err != nil {
 			cspan.SetStatus(codes.Error, err.Error())
@@ -159,21 +161,33 @@ func (e *Engine) Diagnose(ctx context.Context, q elastic.ContractQuery, syncStar
 		CorrelationToken: token,
 	}
 
+	// Record Elastic confidence regardless of Dynatrace outcome.
+	if es.cc != nil {
+		span.SetAttributes(attribute.Float64("kineticz.elastic_confidence_score", es.cc.RRFConfidence))
+	}
+
 	if dt.err != nil {
 		if errors.Is(dt.err, dynatrace.ErrTelemetryUnavailable) {
 			out.Degraded = true
-			span.SetAttributes(attribute.Bool("kineticz.degraded", true))
+			span.SetAttributes(
+				attribute.Bool("kineticz.degraded", true),
+				attribute.String("kineticz.dynatrace_status", "UNAVAILABLE"),
+			)
 			_ = e.recordAudit(ctx, "DIAGNOSIS_DEGRADED", token, "dynatrace", dt.err.Error())
 			return out, nil
 		}
 		span.SetStatus(codes.Error, "dynatrace: "+dt.err.Error())
 		span.RecordError(dt.err)
+		span.SetAttributes(attribute.String("kineticz.dynatrace_status", "ERROR"))
 		_ = e.recordAudit(ctx, "DIAGNOSIS_FAILED", token, "dynatrace", dt.err.Error())
 		return nil, fmt.Errorf("diagnose: dynatrace query: %w", dt.err)
 	}
 
 	out.ConsumerHealth = dt.ch
-	span.SetAttributes(attribute.Bool("kineticz.degraded", false))
+	span.SetAttributes(
+		attribute.Bool("kineticz.degraded", false),
+		attribute.String("kineticz.dynatrace_status", "OK"),
+	)
 	_ = e.recordAudit(ctx, "DIAGNOSIS_OK", token, "", "")
 	return out, nil
 }

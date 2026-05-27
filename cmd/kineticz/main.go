@@ -136,11 +136,13 @@ func healthHandler(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
-// pubkeyHandler serves the base64-encoded Ed25519 public key so judges can
-// independently verify the audit chain against entries in MongoDB.
+// pubkeyHandler serves the hex-encoded Ed25519 public key so judges can
+// independently verify the audit chain against entries in MongoDB. Hex
+// matches the format of KINETICZ_ED25519_SEED, so the same toolchain
+// (openssl, xxd) works for both halves of the keypair.
 func pubkeyHandler(pub ed25519.PublicKey) http.HandlerFunc {
-	encoded := base64.StdEncoding.EncodeToString(pub)
-	body := fmt.Sprintf(`{"algorithm":"ed25519","public_key":"%s"}`, encoded)
+	encoded := hex.EncodeToString(pub)
+	body := fmt.Sprintf(`{"algorithm":"ed25519","encoding":"hex","public_key":"%s"}`, encoded)
 	return func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -315,6 +317,7 @@ func loadConfig() (config, error) {
 		"PHOENIX_API_KEY":            cfg.PhoenixAPIKey,
 		"ELASTIC_URL":                cfg.ElasticURL,
 		"DYNATRACE_URL":         cfg.DynatraceURL,
+		"DYNATRACE_TOKEN":       cfg.DynatraceToken,
 		"FIVETRAN_SECRET":       cfg.FivetranSecret,
 		"KINETICZ_ED25519_SEED": cfg.Ed25519SeedHex,
 	} {
@@ -397,7 +400,7 @@ func buildDeps(ctx context.Context, cfg config) (Deps, func(), error) {
 
 	httpDefault := http.DefaultClient
 	elasticClient := elastic.NewClient(httpDefault, writer, cfg.ElasticURL)
-	dynatraceClient := dynatrace.NewClient(httpDefault, writer, cfg.DynatraceURL)
+	dynatraceClient := dynatrace.NewClient(httpDefault, writer, cfg.DynatraceURL, cfg.DynatraceToken)
 	gitlabClient := gitlab.NewHTTPClient(httpDefault, cfg.GitLabURL, cfg.GitLabToken)
 	geminiClient := gemini.NewVertexClient(httpDefault, writer, cfg.GeminiProjectID, cfg.GeminiLocation, cfg.GeminiModel, envTokenFunc)
 

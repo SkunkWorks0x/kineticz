@@ -17,25 +17,48 @@ const (
 	VerdictBlock
 )
 
-// LocalResult is the local pre-filter's decision plus a stable reason
-// identifier suitable for audit payloads.
+// LocalResult is the local pre-filter's decision plus per-check flags
+// suitable for Phoenix span attributes.
 type LocalResult struct {
-	Verdict Verdict
-	Reason  string
+	Verdict            Verdict
+	Reason             string
+	ParsesAsGo         bool
+	SignaturePreserved bool
 }
 
 // RunLocal applies the local pre-filter checks in order. Returns the first
 // BLOCK encountered, or ALLOW if all checks pass. Pure function; no I/O.
+// Both per-check flags are populated regardless of which check (if any)
+// produced the BLOCK so observability sees the full picture.
 //
 // Checks:
 //  1. patched bytes must parse as Go (parse error → BLOCK).
 //  2. all exported function signatures in orig must remain unchanged in
 //     patched (removed or modified signature → BLOCK).
 func RunLocal(orig, patched []byte) LocalResult {
-	if r := parsesAsGo(patched); r.Verdict == VerdictBlock {
-		return r
+	parses := parsesAsGo(patched)
+	if parses.Verdict == VerdictBlock {
+		return LocalResult{
+			Verdict:            VerdictBlock,
+			Reason:             parses.Reason,
+			ParsesAsGo:         false,
+			SignaturePreserved: false,
+		}
 	}
-	return preservesSignature(orig, patched)
+	sig := preservesSignature(orig, patched)
+	if sig.Verdict == VerdictBlock {
+		return LocalResult{
+			Verdict:            VerdictBlock,
+			Reason:             sig.Reason,
+			ParsesAsGo:         true,
+			SignaturePreserved: false,
+		}
+	}
+	return LocalResult{
+		Verdict:            VerdictAllow,
+		ParsesAsGo:         true,
+		SignaturePreserved: true,
+	}
 }
 
 func parsesAsGo(src []byte) LocalResult {

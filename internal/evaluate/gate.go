@@ -12,6 +12,7 @@ import (
 
 	"github.com/skunkworks0x/kineticz/internal/arize"
 	"github.com/skunkworks0x/kineticz/internal/audit"
+	"github.com/skunkworks0x/kineticz/internal/corr"
 )
 
 // RejectedIndexer indexes rejected diffs into Elastic so future retrieval
@@ -55,6 +56,9 @@ func (g *Gate) Evaluate(ctx context.Context, orig, patched, diff []byte) (*Resul
 
 	ctx, span := arize.Tracer().Start(ctx, "kineticz.evaluate")
 	span.SetAttributes(attribute.String("diff.sha256", sha))
+	if tok, ok := corr.FromContext(ctx); ok {
+		span.SetAttributes(attribute.String("kineticz.correlation_token", string(tok)))
+	}
 	defer span.End()
 
 	if _, dup := g.dedup.Load(sha); dup {
@@ -65,6 +69,10 @@ func (g *Gate) Evaluate(ctx context.Context, orig, patched, diff []byte) (*Resul
 	}
 
 	local := RunLocal(orig, patched)
+	span.SetAttributes(
+		attribute.Bool("kineticz.parses_as_go", local.ParsesAsGo),
+		attribute.Bool("kineticz.signature_preserved", local.SignaturePreserved),
+	)
 	if local.Verdict == VerdictBlock {
 		if _, loaded := g.dedup.LoadOrStore(sha, struct{}{}); loaded {
 			res.Verdict = VerdictBlock

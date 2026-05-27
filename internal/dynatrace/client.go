@@ -51,15 +51,24 @@ type client struct {
 	http    *http.Client
 	audit   audit.Writer
 	baseURL string
+	token   string
 	backoff time.Duration
 	retries int
 }
 
-func NewClient(httpClient *http.Client, aw audit.Writer, baseURL string) *client {
+// NewClient constructs a Dynatrace REST client. token is the API access
+// token (DYNATRACE_TOKEN env var); the do helper attaches it as
+// "Authorization: Bearer <token>" on every request.
+//
+// [unverified] Dynatrace's actual API auth prefix is "Api-Token <token>"
+// per their public docs. Bearer is honored here per Phase 10 spec; flip
+// the prefix in c.do below if production rejects with 401.
+func NewClient(httpClient *http.Client, aw audit.Writer, baseURL, token string) *client {
 	return &client{
 		http:    httpClient,
 		audit:   aw,
 		baseURL: baseURL,
+		token:   token,
 		backoff: 100 * time.Millisecond,
 		retries: 3,
 	}
@@ -167,6 +176,9 @@ func (c *client) do(ctx context.Context, method, path string, body []byte) ([]by
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	resp, err := httputil.Do(ctx, c.http, req, c.retries, c.backoff)
 	if err != nil {

@@ -99,7 +99,7 @@ func (c *Coordinator) ApplyAndOpenMR(ctx context.Context, req Request) (*Result,
 		return nil, fmt.Errorf("commit: create MR (commit %s already pushed): %w", sha, err)
 	}
 	span.SetAttributes(
-		attribute.String("kineticz.mr_url", mr.MRURL),
+		attribute.String("kineticz.gitlab_mr_url", mr.MRURL),
 		attribute.Int("kineticz.mr_iid", mr.MRIID),
 	)
 	_ = c.writeAudit(ctx, "MR_CREATED", req.FilePath, "", mr.MRIID, sha)

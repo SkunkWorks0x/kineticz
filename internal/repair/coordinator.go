@@ -47,12 +47,14 @@ type Result struct {
 
 // Coordinator runs up to MaxIterations of Gemini-generated patch attempts,
 // validating each diff structurally before approving. Approval returns the
-// raw diff bytes; downstream evaluate + commit stages consume them.
+// raw diff bytes; downstream evaluate + commit stages consume them. ModelName
+// is recorded on the repair span so Phoenix can filter traces by model.
 type Coordinator struct {
 	gemini        gemini.Client
 	audit         audit.ThoughtWriter
 	target        TargetReader
 	MaxIterations int
+	ModelName     string
 }
 
 // New wires a Coordinator with the default 4 iterations.
@@ -62,6 +64,7 @@ func New(g gemini.Client, aw audit.ThoughtWriter, tr TargetReader) *Coordinator 
 		audit:         aw,
 		target:        tr,
 		MaxIterations: DefaultMaxIterations,
+		ModelName:     "gemini-3.5-flash",
 	}
 }
 
@@ -76,7 +79,9 @@ func (c *Coordinator) Repair(ctx context.Context, diag *diagnose.DiagnosisResult
 
 	ctx, span := arize.Tracer().Start(ctx, "kineticz.repair")
 	defer span.End()
-	if tok, ok := corr.FromContext(ctx); ok {
+	span.SetAttributes(attribute.String("kineticz.gemini_model", c.ModelName))
+	tok, _ := corr.FromContext(ctx)
+	if tok != "" {
 		span.SetAttributes(attribute.String("kineticz.correlation_token", string(tok)))
 	}
 
@@ -93,7 +98,13 @@ func (c *Coordinator) Repair(ctx context.Context, diag *diagnose.DiagnosisResult
 	for iter := 0; iter < c.MaxIterations; iter++ {
 		outcome := func() iterationOutcome {
 			iterCtx, iterSpan := arize.Tracer().Start(ctx, "kineticz.repair.iteration")
-			iterSpan.SetAttributes(attribute.Int("kineticz.attempt_number", iter+1))
+			iterSpan.SetAttributes(
+				attribute.Int("kineticz.attempt_number", iter+1),
+				attribute.String("kineticz.gemini_model", c.ModelName),
+			)
+			if tok != "" {
+				iterSpan.SetAttributes(attribute.String("kineticz.correlation_token", string(tok)))
+			}
 			defer iterSpan.End()
 
 			target, err := c.target.Read(iterCtx, targetPath)

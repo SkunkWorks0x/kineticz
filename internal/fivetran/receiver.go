@@ -98,6 +98,7 @@ func (r *Receiver) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	ctx, span := arize.Tracer().Start(ctx, "fivetran.receive")
 	defer span.End()
 	span.SetAttributes(
+		attribute.String("kineticz.event_id", eventID),
 		attribute.String("kineticz.event_type", anomaly.Event),
 		attribute.String("kineticz.connector_id", anomaly.ConnectorID),
 		attribute.String("kineticz.sync_id", anomaly.SyncID),
