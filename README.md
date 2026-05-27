@@ -27,7 +27,7 @@ flowchart LR
     C -->|file + MR| GL[GitLab]
     GL -.->|MR URL| C
     C -->|PIPELINE_COMPLETE| MG
-    FR -.->|OTel traces| PH[Phoenix Cloud]
+    FR -.->|OTel traces| PH[Arize Phoenix Observability]
 ```
 
 ## Quickstart
