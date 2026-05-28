@@ -11,11 +11,12 @@ spec:
         autoscaling.knative.dev/maxScale: "10"
         run.googleapis.com/execution-environment: gen2
         run.googleapis.com/cpu-throttling: "false"
+        kineticz.dev/deploy-ts: "2026-05-28T07-50"
     spec:
       timeoutSeconds: 300
       containerConcurrency: 80
       containers:
-        - image: gcr.io/PROJECT_ID/kineticz:latest
+        - image: us-central1-docker.pkg.dev/blade-agent-488115/kineticz/kineticz:latest
           ports:
             - name: http1
               containerPort: 8080
@@ -24,17 +25,15 @@ spec:
               memory: "512Mi"
               cpu: "1000m"
           env:
-            - name: PORT
-              value: "8080"
             - name: MONGO_URI
               valueFrom:
                 secretKeyRef:
-                  name: kineticz-mongo-uri
+                  name: MONGO_URI
                   key: latest
             - name: GEMINI_PROJECT_ID
               valueFrom:
                 secretKeyRef:
-                  name: kineticz-gemini-project-id
+                  name: GEMINI_PROJECT_ID
                   key: latest
             - name: GEMINI_LOCATION
               value: us-central1
@@ -43,52 +42,47 @@ spec:
             - name: GITLAB_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: kineticz-gitlab-token
+                  name: GITLAB_TOKEN
                   key: latest
             - name: GITLAB_PROJECT_ID
               valueFrom:
                 secretKeyRef:
-                  name: kineticz-gitlab-project-id
+                  name: GITLAB_PROJECT_ID
                   key: latest
             - name: PHOENIX_COLLECTOR_ENDPOINT
               valueFrom:
                 secretKeyRef:
-                  name: kineticz-phoenix-endpoint
+                  name: PHOENIX_COLLECTOR_ENDPOINT
                   key: latest
             - name: PHOENIX_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: kineticz-phoenix-api-key
+                  name: PHOENIX_API_KEY
                   key: latest
             - name: ELASTIC_URL
               valueFrom:
                 secretKeyRef:
-                  name: kineticz-elastic-url
+                  name: ELASTIC_URL
                   key: latest
             - name: DYNATRACE_URL
               valueFrom:
                 secretKeyRef:
-                  name: kineticz-dynatrace-url
+                  name: DYNATRACE_URL
                   key: latest
             - name: DYNATRACE_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: kineticz-dynatrace-token
+                  name: DYNATRACE_TOKEN
                   key: latest
             - name: FIVETRAN_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: kineticz-fivetran-secret
+                  name: FIVETRAN_SECRET
                   key: latest
             - name: KINETICZ_ED25519_SEED
               valueFrom:
                 secretKeyRef:
-                  name: kineticz-ed25519-seed
-                  key: latest
-            - name: GOOGLE_ACCESS_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: kineticz-google-access-token
+                  name: KINETICZ_ED25519_SEED
                   key: latest
   traffic:
     - percent: 100
