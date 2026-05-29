@@ -22,13 +22,13 @@ const TracerName = "kineticz"
 // (PHOENIX_API_KEY). The returned shutdown function flushes pending spans
 // and must be deferred by the caller before process exit.
 //
-// `[unverified]` against current Phoenix Cloud auth conventions; the
-// "api_key" header name follows examples in the Phoenix docs but may need
-// to be "authorization: Bearer <key>" depending on tenant configuration.
+// Phoenix Cloud's setup snippet for this space uses bearer auth, so the JWT
+// key goes in "authorization: Bearer <key>". The header name is lowercase for
+// OTLP gRPC compatibility.
 func NewTracerProvider(ctx context.Context, endpoint, apiKey string) (*sdktrace.TracerProvider, func(context.Context) error, error) {
 	headers := map[string]string{}
 	if apiKey != "" {
-		headers["api_key"] = apiKey
+		headers["authorization"] = "Bearer " + apiKey
 	}
 	opts := []otlptracehttp.Option{
 		otlptracehttp.WithEndpointURL(endpoint),
