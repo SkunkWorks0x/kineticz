@@ -99,6 +99,7 @@ func (e *Engine) Diagnose(ctx context.Context, q elastic.ContractQuery, syncStar
 	ctx, span := arize.Tracer().Start(ctx, "kineticz.diagnose")
 	defer span.End()
 	span.SetAttributes(
+		attribute.String("openinference.span.kind", "CHAIN"),
 		attribute.String("kineticz.contract_name", q.ContractName),
 		attribute.String("kineticz.correlation_token", string(token)),
 	)
@@ -110,7 +111,10 @@ func (e *Engine) Diagnose(ctx context.Context, q elastic.ContractQuery, syncStar
 	go func() {
 		cctx, cspan := arize.Tracer().Start(timeoutCtx, "elastic.lookup_contract")
 		defer cspan.End()
-		cspan.SetAttributes(attribute.String("kineticz.correlation_token", string(token)))
+		cspan.SetAttributes(
+			attribute.String("openinference.span.kind", "RETRIEVER"),
+			attribute.String("kineticz.correlation_token", string(token)),
+		)
 		cc, err := e.elastic.LookupContract(cctx, q)
 		if err != nil {
 			cspan.SetStatus(codes.Error, err.Error())
@@ -121,7 +125,11 @@ func (e *Engine) Diagnose(ctx context.Context, q elastic.ContractQuery, syncStar
 	go func() {
 		cctx, cspan := arize.Tracer().Start(timeoutCtx, "dynatrace.query_consumer_health")
 		defer cspan.End()
-		cspan.SetAttributes(attribute.String("kineticz.correlation_token", string(token)))
+		cspan.SetAttributes(
+			attribute.String("openinference.span.kind", "TOOL"),
+			attribute.String("tool.name", "dynatrace.query_consumer_health"),
+			attribute.String("kineticz.correlation_token", string(token)),
+		)
 		ch, err := e.dynatrace.QueryConsumerHealth(cctx, syncStartMs, syncEndMs)
 		if err != nil {
 			cspan.SetStatus(codes.Error, err.Error())

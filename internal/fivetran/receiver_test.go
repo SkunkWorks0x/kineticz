@@ -166,7 +166,7 @@ func TestReceiver(t *testing.T) {
 			pipeline := func(_ context.Context, _ Anomaly) {
 				pipelineCalled <- struct{}{}
 			}
-			r := NewReceiver(store, secret, pipeline)
+			r := NewReceiver(store, secret, pipeline, nil)
 
 			req := httptest.NewRequest(http.MethodPost, "/webhooks/fivetran", bytes.NewReader([]byte(tc.body)))
 			if tc.signature != "" {
@@ -205,7 +205,7 @@ func TestReceiver_PanicInPipelineIsRecoveredAndAudited(t *testing.T) {
 	store := &fakeStore{}
 	r := NewReceiver(store, secret, func(context.Context, Anomaly) {
 		panic("simulated downstream crash")
-	})
+	}, nil)
 	req := httptest.NewRequest(http.MethodPost, "/webhooks/fivetran", bytes.NewReader([]byte(triggerBody)))
 	req.Header.Set(SignatureHeader, signBody([]byte(triggerBody)))
 	rec := httptest.NewRecorder()
@@ -230,7 +230,7 @@ func TestReceiver_PanicInPipelineIsRecoveredAndAudited(t *testing.T) {
 
 func TestReceiver_OversizeBodyReturns400(t *testing.T) {
 	store := &fakeStore{}
-	r := NewReceiver(store, secret, func(context.Context, Anomaly) {})
+	r := NewReceiver(store, secret, func(context.Context, Anomaly) {}, nil)
 	huge := bytes.Repeat([]byte("a"), MaxBodyBytes+1)
 	req := httptest.NewRequest(http.MethodPost, "/webhooks/fivetran", bytes.NewReader(huge))
 	req.Header.Set(SignatureHeader, signBody(huge))
@@ -243,7 +243,7 @@ func TestReceiver_OversizeBodyReturns400(t *testing.T) {
 
 func TestReceiver_AcceptedResponseIncludesCorrelationToken(t *testing.T) {
 	store := &fakeStore{}
-	r := NewReceiver(store, secret, func(context.Context, Anomaly) {})
+	r := NewReceiver(store, secret, func(context.Context, Anomaly) {}, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/webhooks/fivetran", bytes.NewReader([]byte(triggerBody)))
 	req.Header.Set(SignatureHeader, signBody([]byte(triggerBody)))

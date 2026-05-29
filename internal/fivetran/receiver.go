@@ -50,13 +50,15 @@ type Receiver struct {
 	store    EventStore
 	secret   []byte
 	pipeline PipelineFunc
+	flush    func(ctx context.Context) error
 }
 
-func NewReceiver(store EventStore, secret string, pipeline PipelineFunc) *Receiver {
+func NewReceiver(store EventStore, secret string, pipeline PipelineFunc, flush func(ctx context.Context) error) *Receiver {
 	return &Receiver{
 		store:    store,
 		secret:   []byte(secret),
 		pipeline: pipeline,
+		flush:    flush,
 	}
 }
 
@@ -155,6 +157,12 @@ func (r *Receiver) spawnPipeline(ctx context.Context, anomaly Anomaly) {
 		timedCtx, cancel := context.WithTimeout(bgCtx, PipelineTimeout)
 		defer cancel()
 		r.pipeline(timedCtx, anomaly)
+		// Flush spans created in this goroutine so the background pipeline
+		// trace exports before Cloud Run reclaims the instance. bgCtx has no
+		// deadline, so the export is not cut short.
+		if r.flush != nil {
+			_ = r.flush(bgCtx)
+		}
 	}()
 }
 

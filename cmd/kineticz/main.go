@@ -57,6 +57,7 @@ type Deps struct {
 	ProjectID      string
 	TargetBranch   string
 	FivetranSecret string
+	TraceFlush     func(context.Context) error
 }
 
 func main() {
@@ -121,7 +122,7 @@ func WireHandler(d Deps) http.Handler {
 	pipeline := func(ctx context.Context, anomaly fivetran.Anomaly) {
 		runPipeline(ctx, d, anomaly)
 	}
-	rec := fivetran.NewReceiver(d.EventStore, d.FivetranSecret, pipeline)
+	rec := fivetran.NewReceiver(d.EventStore, d.FivetranSecret, pipeline, d.TraceFlush)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", healthHandler)
@@ -156,6 +157,7 @@ func runPipeline(ctx context.Context, d Deps, anomaly fivetran.Anomaly) {
 	ctx, span := arize.Tracer().Start(ctx, "kineticz.pipeline")
 	defer span.End()
 	span.SetAttributes(
+		attribute.String("openinference.span.kind", "CHAIN"),
 		attribute.String("kineticz.event_id", eventID),
 		attribute.String("kineticz.connector_id", anomaly.ConnectorID),
 		attribute.String("kineticz.event_type", anomaly.Event),
@@ -362,7 +364,7 @@ func buildDeps(ctx context.Context, cfg config) (Deps, func(), error) {
 	if err != nil {
 		return Deps{}, nil, fmt.Errorf("mongo connect: %w", err)
 	}
-	_, traceShutdown, err := arize.NewTracerProvider(ctx, cfg.PhoenixEndpoint, cfg.PhoenixAPIKey)
+	tp, traceShutdown, err := arize.NewTracerProvider(ctx, cfg.PhoenixEndpoint, cfg.PhoenixAPIKey)
 	if err != nil {
 		_ = mongoClient.Disconnect(context.Background())
 		return Deps{}, nil, fmt.Errorf("arize tracer provider: %w", err)
@@ -427,6 +429,7 @@ func buildDeps(ctx context.Context, cfg config) (Deps, func(), error) {
 		ProjectID:      cfg.GitLabProjectID,
 		TargetBranch:   cfg.GitLabTargetBranch,
 		FivetranSecret: cfg.FivetranSecret,
+		TraceFlush:     tp.ForceFlush,
 	}, cleanup, nil
 }
 

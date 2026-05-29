@@ -10,6 +10,9 @@ import (
 	"net/http"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/skunkworks0x/kineticz/internal/arize"
 	"github.com/skunkworks0x/kineticz/internal/audit"
 	"github.com/skunkworks0x/kineticz/internal/corr"
 	"github.com/skunkworks0x/kineticz/internal/httputil"
@@ -98,6 +101,14 @@ type vertexResponse struct {
 }
 
 func (c *vertexClient) Generate(ctx context.Context, req GenerateRequest) (*Response, error) {
+	ctx, span := arize.Tracer().Start(ctx, "gemini.generate")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("openinference.span.kind", "LLM"),
+		attribute.String("llm.model_name", c.model),
+		attribute.String("input.value", req.UserPrompt),
+	)
+
 	body, err := json.Marshal(buildVertexRequest(req))
 	if err != nil {
 		return nil, fmt.Errorf("gemini: marshal: %w", err)
@@ -151,6 +162,7 @@ func (c *vertexClient) Generate(ctx context.Context, req GenerateRequest) (*Resp
 	}
 
 	out := vertexResponseTo(&parsed)
+	span.SetAttributes(attribute.String("output.value", string(rb)))
 	if err := c.recordAudit(ctx, "GEMINI_GENERATE_OK", nil); err != nil {
 		return nil, fmt.Errorf("gemini: audit write failed: %w", err)
 	}
