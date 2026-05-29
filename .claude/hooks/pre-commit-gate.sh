@@ -19,8 +19,32 @@ set -uo pipefail
 INPUT="$(cat)"
 CMD="$(echo "${INPUT}" | jq -r '.tool_input.command // ""')"
 
-# Only gate git commit. Let every other Bash command through untouched.
-if ! echo "${CMD}" | grep -qE '\bgit\s+commit\b'; then
+# Fire only when the command runs `git commit`. Parse the git subcommand
+# instead of pattern-matching the word "commit": skip git's global options
+# (and the value some take, like `-C <dir>`) so `git -C <dir> commit` and
+# `git -c k=v commit` still gate, while `git commit-tree`, `git commit-graph`,
+# and a stray "commit" in `git log --grep commit` do not.
+runs_git_commit() {
+  local -a tok
+  IFS=$' \t\n' read -rd '' -a tok < <(printf '%s' "${CMD}")
+  local n=${#tok[@]} i j skip
+  for ((i = 0; i < n; i++)); do
+    [[ "${tok[i]}" == "git" ]] || continue
+    skip=0
+    for ((j = i + 1; j < n; j++)); do
+      if ((skip)); then skip=0; continue; fi
+      case "${tok[j]}" in
+        -C|-c|--git-dir|--work-tree|--namespace|--exec-path) skip=1 ;;
+        -*) ;;
+        commit) return 0 ;;
+        *) break ;;
+      esac
+    done
+  done
+  return 1
+}
+
+if ! runs_git_commit; then
   exit 0
 fi
 
