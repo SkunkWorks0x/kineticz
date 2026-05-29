@@ -100,6 +100,7 @@ func (r *Receiver) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	ctx, span := arize.Tracer().Start(ctx, "fivetran.receive")
 	defer span.End()
 	span.SetAttributes(
+		attribute.String("openinference.span.kind", "CHAIN"),
 		attribute.String("kineticz.event_id", eventID),
 		attribute.String("kineticz.event_type", anomaly.Event),
 		attribute.String("kineticz.connector_id", anomaly.ConnectorID),
