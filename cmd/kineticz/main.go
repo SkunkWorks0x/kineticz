@@ -445,15 +445,39 @@ func persistPublicKey(ctx context.Context, client *mongo.Client, dbName string, 
 	return err
 }
 
-// envTokenFunc reads a Google Cloud access token from GOOGLE_ACCESS_TOKEN.
-// For Cloud Run, replace with a metadata-server fetcher that refreshes
-// short-lived tokens.
-func envTokenFunc(_ context.Context) (string, error) {
-	t := os.Getenv("GOOGLE_ACCESS_TOKEN")
-	if t == "" {
-		return "", fmt.Errorf("gemini: GOOGLE_ACCESS_TOKEN not set")
+// envTokenFunc returns a Google Cloud access token. It prefers
+// GOOGLE_ACCESS_TOKEN for local development and falls back to the Cloud Run
+// metadata server, fetching a fresh short-lived token on each call.
+func envTokenFunc(ctx context.Context) (string, error) {
+	if t := os.Getenv("GOOGLE_ACCESS_TOKEN"); t != "" {
+		return t, nil
 	}
-	return t, nil
+
+	const metadataURL = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("metadata server unreachable: %w", err)
+	}
+	req.Header.Set("Metadata-Flavor", "Google")
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("metadata server unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("metadata server unreachable: status %d", resp.StatusCode)
+	}
+
+	var body struct {
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", fmt.Errorf("metadata server unreachable: %w", err)
+	}
+	return body.AccessToken, nil
 }
 
 // noopIndexer is the default evaluate.RejectedIndexer when production
