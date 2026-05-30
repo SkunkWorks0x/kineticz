@@ -24,9 +24,9 @@ import (
 
 	"github.com/skunkworks0x/kineticz/internal/arize"
 	"github.com/skunkworks0x/kineticz/internal/audit"
-	"github.com/skunkworks0x/kineticz/internal/corr"
 	auditmongo "github.com/skunkworks0x/kineticz/internal/audit/mongodb"
 	"github.com/skunkworks0x/kineticz/internal/commit"
+	"github.com/skunkworks0x/kineticz/internal/corr"
 	"github.com/skunkworks0x/kineticz/internal/dynatrace"
 	"github.com/skunkworks0x/kineticz/internal/elastic"
 	"github.com/skunkworks0x/kineticz/internal/engine/diagnose"
@@ -186,9 +186,8 @@ func runPipeline(ctx context.Context, d Deps, anomaly fivetran.Anomaly) {
 	syncStartMs := anomaly.Created.UnixMilli()
 
 	diag, err := d.Diagnose.Diagnose(ctx, elastic.ContractQuery{
-		ContractName:  contractName,
-		Columns:       columns,
-		DiffEmbedding: nil,
+		ContractName: contractName,
+		Columns:      columns,
 	}, syncStartMs, syncEndMs)
 	if err != nil {
 		fail("diagnose", err)
@@ -268,60 +267,65 @@ func (g *gitlabFileReader) Read(ctx context.Context, path string) ([]byte, error
 }
 
 type config struct {
-	Port               string
-	MongoURI           string
-	MongoDB            string
-	GeminiProjectID    string
-	GeminiLocation     string
-	GeminiModel        string
-	GitLabURL          string
-	GitLabToken        string
-	GitLabProjectID    string
-	GitLabTargetBranch string
-	PhoenixEndpoint    string
-	PhoenixAPIKey      string
-	ElasticURL         string
-	DynatraceURL       string
-	DynatraceToken     string
-	FivetranSecret     string
-	Ed25519SeedHex     string
+	Port                  string
+	MongoURI              string
+	MongoDB               string
+	GeminiProjectID       string
+	GeminiLocation        string
+	GeminiModel           string
+	GitLabURL             string
+	GitLabToken           string
+	GitLabProjectID       string
+	GitLabTargetBranch    string
+	PhoenixEndpoint       string
+	PhoenixAPIKey         string
+	ElasticURL            string
+	ElasticAPIKey         string
+	ElasticInferenceModel string
+	DynatraceURL          string
+	DynatraceToken        string
+	FivetranSecret        string
+	Ed25519SeedHex        string
 }
 
 func loadConfig() (config, error) {
 	cfg := config{
-		Port:               getenv("PORT", "8080"),
-		MongoURI:           os.Getenv("MONGO_URI"),
-		MongoDB:            getenv("MONGO_DB", "kineticz"),
-		GeminiProjectID:    os.Getenv("GEMINI_PROJECT_ID"),
-		GeminiLocation:     getenv("GEMINI_LOCATION", "us-central1"),
-		GeminiModel:        getenv("GEMINI_MODEL", "gemini-3.5-flash"),
-		GitLabURL:          os.Getenv("GITLAB_URL"),
-		GitLabToken:        os.Getenv("GITLAB_TOKEN"),
-		GitLabProjectID:    os.Getenv("GITLAB_PROJECT_ID"),
-		GitLabTargetBranch: getenv("GITLAB_TARGET_BRANCH", "main"),
-		PhoenixEndpoint:    os.Getenv("PHOENIX_COLLECTOR_ENDPOINT"),
-		PhoenixAPIKey:      os.Getenv("PHOENIX_API_KEY"),
-		ElasticURL:         os.Getenv("ELASTIC_URL"),
-		DynatraceURL:       os.Getenv("DYNATRACE_URL"),
-		DynatraceToken:     os.Getenv("DYNATRACE_TOKEN"),
-		FivetranSecret:     os.Getenv("FIVETRAN_SECRET"),
-		Ed25519SeedHex:     os.Getenv("KINETICZ_ED25519_SEED"),
+		Port:                  getenv("PORT", "8080"),
+		MongoURI:              os.Getenv("MONGO_URI"),
+		MongoDB:               getenv("MONGO_DB", "kineticz"),
+		GeminiProjectID:       os.Getenv("GEMINI_PROJECT_ID"),
+		GeminiLocation:        getenv("GEMINI_LOCATION", "us-central1"),
+		GeminiModel:           getenv("GEMINI_MODEL", "gemini-3.5-flash"),
+		GitLabURL:             os.Getenv("GITLAB_URL"),
+		GitLabToken:           os.Getenv("GITLAB_TOKEN"),
+		GitLabProjectID:       os.Getenv("GITLAB_PROJECT_ID"),
+		GitLabTargetBranch:    getenv("GITLAB_TARGET_BRANCH", "main"),
+		PhoenixEndpoint:       os.Getenv("PHOENIX_COLLECTOR_ENDPOINT"),
+		PhoenixAPIKey:         os.Getenv("PHOENIX_API_KEY"),
+		ElasticURL:            os.Getenv("ELASTIC_URL"),
+		ElasticAPIKey:         os.Getenv("ELASTIC_API_KEY"),
+		ElasticInferenceModel: getenv("ELASTIC_INFERENCE_MODEL", ".multilingual-e5-small-elasticsearch"),
+		DynatraceURL:          os.Getenv("DYNATRACE_URL"),
+		DynatraceToken:        os.Getenv("DYNATRACE_TOKEN"),
+		FivetranSecret:        os.Getenv("FIVETRAN_SECRET"),
+		Ed25519SeedHex:        os.Getenv("KINETICZ_ED25519_SEED"),
 	}
 
 	missing := []string{}
 	for k, v := range map[string]string{
-		"MONGO_URI":             cfg.MongoURI,
-		"GEMINI_PROJECT_ID":     cfg.GeminiProjectID,
-		"GITLAB_URL":            cfg.GitLabURL,
-		"GITLAB_TOKEN":          cfg.GitLabToken,
-		"GITLAB_PROJECT_ID":     cfg.GitLabProjectID,
+		"MONGO_URI":                  cfg.MongoURI,
+		"GEMINI_PROJECT_ID":          cfg.GeminiProjectID,
+		"GITLAB_URL":                 cfg.GitLabURL,
+		"GITLAB_TOKEN":               cfg.GitLabToken,
+		"GITLAB_PROJECT_ID":          cfg.GitLabProjectID,
 		"PHOENIX_COLLECTOR_ENDPOINT": cfg.PhoenixEndpoint,
 		"PHOENIX_API_KEY":            cfg.PhoenixAPIKey,
 		"ELASTIC_URL":                cfg.ElasticURL,
-		"DYNATRACE_URL":         cfg.DynatraceURL,
-		"DYNATRACE_TOKEN":       cfg.DynatraceToken,
-		"FIVETRAN_SECRET":       cfg.FivetranSecret,
-		"KINETICZ_ED25519_SEED": cfg.Ed25519SeedHex,
+		"ELASTIC_API_KEY":            cfg.ElasticAPIKey,
+		"DYNATRACE_URL":              cfg.DynatraceURL,
+		"DYNATRACE_TOKEN":            cfg.DynatraceToken,
+		"FIVETRAN_SECRET":            cfg.FivetranSecret,
+		"KINETICZ_ED25519_SEED":      cfg.Ed25519SeedHex,
 	} {
 		if v == "" {
 			missing = append(missing, k)
@@ -401,7 +405,7 @@ func buildDeps(ctx context.Context, cfg config) (Deps, func(), error) {
 	}
 
 	httpDefault := http.DefaultClient
-	elasticClient := elastic.NewClient(httpDefault, writer, cfg.ElasticURL)
+	elasticClient := elastic.NewClient(httpDefault, writer, cfg.ElasticURL, cfg.ElasticAPIKey, cfg.ElasticInferenceModel)
 	dynatraceClient := dynatrace.NewClient(httpDefault, writer, cfg.DynatraceURL, cfg.DynatraceToken)
 	gitlabClient := gitlab.NewHTTPClient(httpDefault, cfg.GitLabURL, cfg.GitLabToken)
 	geminiClient := gemini.NewVertexClient(httpDefault, writer, cfg.GeminiProjectID, cfg.GeminiLocation, cfg.GeminiModel, envTokenFunc)

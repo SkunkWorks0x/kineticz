@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
+	"net/url"
 	"time"
 
 	"github.com/skunkworks0x/kineticz/internal/audit"
@@ -20,9 +20,8 @@ type Client interface {
 }
 
 type ContractQuery struct {
-	ContractName  string
-	Columns       []string
-	DiffEmbedding []float32
+	ContractName string
+	Columns      []string
 }
 
 type ContractContext struct {
@@ -52,20 +51,24 @@ var (
 )
 
 type client struct {
-	http    *http.Client
-	audit   audit.Writer
-	baseURL string
-	backoff time.Duration
-	retries int
+	http           *http.Client
+	audit          audit.Writer
+	baseURL        string
+	apiKey         string
+	inferenceModel string
+	backoff        time.Duration
+	retries        int
 }
 
-func NewClient(httpClient *http.Client, aw audit.Writer, baseURL string) *client {
+func NewClient(httpClient *http.Client, aw audit.Writer, baseURL, apiKey, inferenceModel string) *client {
 	return &client{
-		http:    httpClient,
-		audit:   aw,
-		baseURL: baseURL,
-		backoff: 100 * time.Millisecond,
-		retries: 3,
+		http:           httpClient,
+		audit:          aw,
+		baseURL:        baseURL,
+		apiKey:         apiKey,
+		inferenceModel: inferenceModel,
+		backoff:        100 * time.Millisecond,
+		retries:        3,
 	}
 }
 
@@ -75,7 +78,7 @@ func (c *client) LookupContract(ctx context.Context, q ContractQuery) (*Contract
 		_ = c.recordAudit(ctx, "ELASTIC_LOOKUP_FAILED", q.ContractName, err)
 		return nil, err
 	}
-	hits, err := c.searchMitigationsRRF(ctx, q.Columns, q.DiffEmbedding)
+	hits, err := c.searchMitigationsRRF(ctx, q.ContractName)
 	if err != nil {
 		_ = c.recordAudit(ctx, "ELASTIC_LOOKUP_FAILED", q.ContractName, err)
 		return nil, err
@@ -94,7 +97,9 @@ func (c *client) LookupContract(ctx context.Context, q ContractQuery) (*Contract
 }
 
 func (c *client) fetchContractYAML(ctx context.Context, name string) (string, error) {
-	body, status, err := c.do(ctx, http.MethodGet, "/contracts/_doc/"+name, nil)
+	// url.PathEscape so a slashed id (e.g. "postgres/orders_pg") stays one _id;
+	// a raw slash makes ES read the path as _id="postgres" and 404 the lookup.
+	body, status, err := c.do(ctx, http.MethodGet, "/contracts/_doc/"+url.PathEscape(name), nil)
 	if err != nil {
 		return "", err
 	}
@@ -119,7 +124,11 @@ func (c *client) fetchContractYAML(ctx context.Context, name string) (string, er
 	return doc.Source.YAML, nil
 }
 
-func (c *client) searchMitigationsRRF(ctx context.Context, columns []string, embedding []float32) ([]Mitigation, error) {
+func (c *client) searchMitigationsRRF(ctx context.Context, signature string) ([]Mitigation, error) {
+	// Both RRF legs run on the connector signature (e.g. "postgres/sales_db").
+	// BM25 matches it against columns/table_metadata; the KNN leg has Elastic
+	// embed it with the E5 inference endpoint (query_vector_builder) and match
+	// against the indexed diff_embedding vectors. Go sends no vector.
 	reqBody := map[string]any{
 		"retriever": map[string]any{
 			"rrf": map[string]any{
@@ -128,7 +137,7 @@ func (c *client) searchMitigationsRRF(ctx context.Context, columns []string, emb
 						"standard": map[string]any{
 							"query": map[string]any{
 								"multi_match": map[string]any{
-									"query":  strings.Join(columns, " "),
+									"query":  signature,
 									"fields": []string{"columns", "table_metadata"},
 								},
 							},
@@ -136,8 +145,13 @@ func (c *client) searchMitigationsRRF(ctx context.Context, columns []string, emb
 					},
 					map[string]any{
 						"knn": map[string]any{
-							"field":          "diff_embedding",
-							"query_vector":   embedding,
+							"field": "diff_embedding",
+							"query_vector_builder": map[string]any{
+								"text_embedding": map[string]any{
+									"model_id":   c.inferenceModel,
+									"model_text": signature,
+								},
+							},
 							"k":              10,
 							"num_candidates": 100,
 						},
@@ -207,6 +221,9 @@ func (c *client) do(ctx context.Context, method, path string, body []byte) ([]by
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	// Secured cluster: API-key auth. c.apiKey is the base64 "id:api_key" value
+	// Elasticsearch returns from POST /_security/api_key; pass it through as-is.
+	req.Header.Set("Authorization", "ApiKey "+c.apiKey)
 	resp, err := httputil.Do(ctx, c.http, req, c.retries, c.backoff)
 	if err != nil {
 		if errors.Is(err, httputil.ErrUnavailable) {

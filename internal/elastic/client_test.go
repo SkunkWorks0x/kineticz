@@ -134,9 +134,8 @@ func TestLookupContract(t *testing.T) {
 
 			ctx := corr.WithToken(context.Background(), tc.token)
 			q := ContractQuery{
-				ContractName:  "users_v1",
-				Columns:       []string{"id", "email", "created_at"},
-				DiffEmbedding: []float32{0.1, 0.2, 0.3, 0.4},
+				ContractName: "users_v1",
+				Columns:      []string{"id", "email", "created_at"},
 			}
 
 			cc, err := c.LookupContract(ctx, q)
@@ -180,5 +179,50 @@ func TestLookupContract(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestLookupContract_ContractNameWithSlashIsPathEscaped(t *testing.T) {
+	contractFix := loadFixture(t, "contract.json")
+	searchFix := loadFixture(t, "rrf_search.json")
+
+	var mu sync.Mutex
+	var gotContractTarget string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/contracts/_doc/"):
+			mu.Lock()
+			gotContractTarget = r.RequestURI
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(contractFix)
+		case r.Method == http.MethodPost && r.URL.Path == "/mitigations/_search":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(searchFix)
+		default:
+			http.Error(w, "unexpected target: "+r.RequestURI, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := &client{
+		http:    server.Client(),
+		audit:   &recordingAudit{},
+		baseURL: server.URL,
+		backoff: 1 * time.Millisecond,
+		retries: 3,
+	}
+
+	ctx := corr.WithToken(context.Background(), "tok-slash")
+	if _, err := c.LookupContract(ctx, ContractQuery{ContractName: "postgres/orders_pg"}); err != nil {
+		t.Fatalf("LookupContract: %v", err)
+	}
+
+	const want = "/contracts/_doc/postgres%2Forders_pg"
+	mu.Lock()
+	got := gotContractTarget
+	mu.Unlock()
+	if got != want {
+		t.Errorf("contract GET target = %q, want %q (the slash must be percent-encoded so ES treats the name as one _id)", got, want)
 	}
 }

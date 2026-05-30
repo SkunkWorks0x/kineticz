@@ -19,12 +19,11 @@ func diagnoseTool() ToolDefinition {
 			Properties: map[string]Schema{
 				"contract_name":     {Type: "STRING", Description: "Identifier of the contract."},
 				"columns":           {Type: "ARRAY", Items: &Schema{Type: "STRING"}, Description: "Column names from the failing pipeline."},
-				"diff_embedding":    {Type: "ARRAY", Items: &Schema{Type: "NUMBER"}, Description: "Diff embedding vector."},
 				"sync_start_ms":     {Type: "INTEGER", Description: "Window start (Unix ms)."},
 				"sync_end_ms":       {Type: "INTEGER", Description: "Window end (Unix ms)."},
 				"correlation_token": {Type: "STRING", Description: "Caller-provided correlation token propagated through the audit chain."},
 			},
-			Required: []string{"contract_name", "columns", "diff_embedding", "sync_start_ms", "sync_end_ms", "correlation_token"},
+			Required: []string{"contract_name", "columns", "sync_start_ms", "sync_end_ms", "correlation_token"},
 		},
 	}
 }

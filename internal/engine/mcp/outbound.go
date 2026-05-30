@@ -28,13 +28,8 @@ func elasticLookupContractTool() ToolDefinition {
 					Description: "Column names from the failing pipeline. Used as the BM25 query against columns and table_metadata.",
 					Items:       &Schema{Type: "STRING"},
 				},
-				"diff_embedding": {
-					Type:        "ARRAY",
-					Description: "Embedding vector of the current pipeline diff. Used as the KNN query against historical diff_embedding vectors.",
-					Items:       &Schema{Type: "NUMBER"},
-				},
 			},
-			Required: []string{"contract_name", "columns", "diff_embedding"},
+			Required: []string{"contract_name", "columns"},
 		},
 	}
 }

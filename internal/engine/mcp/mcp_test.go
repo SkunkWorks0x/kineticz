@@ -67,7 +67,6 @@ func TestInboundTools(t *testing.T) {
 	requiredHas := map[string]bool{
 		"contract_name":     false,
 		"columns":           false,
-		"diff_embedding":    false,
 		"sync_start_ms":     false,
 		"sync_end_ms":       false,
 		"correlation_token": false,
