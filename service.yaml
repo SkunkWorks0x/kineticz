@@ -11,7 +11,7 @@ spec:
         autoscaling.knative.dev/maxScale: "10"
         run.googleapis.com/execution-environment: gen2
         run.googleapis.com/cpu-throttling: "false"
-        kineticz.dev/deploy-ts: "2026-05-29T08-29"
+        kineticz.dev/deploy-ts: "2026-05-31T06-25"
     spec:
       timeoutSeconds: 300
       containerConcurrency: 80
@@ -63,6 +63,11 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: ELASTIC_URL
+                  key: latest
+            - name: ELASTIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ELASTIC_API_KEY
                   key: latest
             - name: DYNATRACE_URL
               valueFrom:
