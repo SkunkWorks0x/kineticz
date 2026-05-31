@@ -226,3 +226,110 @@ func TestLookupContract_ContractNameWithSlashIsPathEscaped(t *testing.T) {
 		t.Errorf("contract GET target = %q, want %q (the slash must be percent-encoded so ES treats the name as one _id)", got, want)
 	}
 }
+
+func TestLookupContract_MitigationsFailSoft(t *testing.T) {
+	contractFix := loadFixture(t, "contract.json")
+	searchFix := loadFixture(t, "rrf_search.json")
+	const mlBody = `{"error":{"type":"status_exception","reason":"No ML nodes exist in the cluster"},"status":429}`
+	const emptyHits = `{"hits":{"hits":[]}}`
+
+	cases := []struct {
+		name         string
+		rrfStatus    int
+		bm25Status   int
+		bm25Body     string
+		wantMode     string
+		wantDegraded bool
+		wantHits     int
+		wantVStatus  int
+		wantVReason  string
+		wantAudit    string
+	}{
+		{"rrf_success", http.StatusOK, 0, "", "rrf", false, 3, 0, "", "ELASTIC_LOOKUP_OK"},
+		{"rrf_429_falls_back_to_bm25_hits", http.StatusTooManyRequests, http.StatusOK, "", "bm25_fallback", true, 3, 429, "no_ml_nodes", "ELASTIC_LOOKUP_DEGRADED"},
+		{"rrf_429_bm25_no_hits_returns_empty", http.StatusTooManyRequests, http.StatusOK, emptyHits, "bm25_fallback", true, 0, 429, "no_ml_nodes", "ELASTIC_LOOKUP_DEGRADED"},
+		{"rrf_429_bm25_error_returns_empty_optional", http.StatusTooManyRequests, http.StatusBadRequest, "", "empty_optional", true, 0, 429, "no_ml_nodes", "ELASTIC_LOOKUP_DEGRADED"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/contracts/_doc/"):
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write(contractFix)
+				case r.Method == http.MethodPost && r.URL.Path == "/mitigations/_search":
+					var m map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
+						http.Error(w, "bad body", http.StatusBadRequest)
+						return
+					}
+					if _, isRRF := m["retriever"]; isRRF {
+						if tc.rrfStatus != http.StatusOK {
+							w.WriteHeader(tc.rrfStatus)
+							_, _ = w.Write([]byte(mlBody))
+							return
+						}
+						w.WriteHeader(http.StatusOK)
+						_, _ = w.Write(searchFix)
+						return
+					}
+					// BM25 leg: plain query, no retriever.
+					if tc.bm25Status != http.StatusOK {
+						w.WriteHeader(tc.bm25Status)
+						_, _ = w.Write([]byte(`{"error":"bm25 failed"}`))
+						return
+					}
+					w.WriteHeader(http.StatusOK)
+					if tc.bm25Body != "" {
+						_, _ = w.Write([]byte(tc.bm25Body))
+					} else {
+						_, _ = w.Write(searchFix)
+					}
+				default:
+					http.Error(w, "unexpected target: "+r.RequestURI, http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			aw := &recordingAudit{}
+			c := &client{
+				http:    server.Client(),
+				audit:   aw,
+				baseURL: server.URL,
+				backoff: 1 * time.Millisecond,
+				retries: 3,
+			}
+
+			ctx := corr.WithToken(context.Background(), "tok-failsoft")
+			cc, err := c.LookupContract(ctx, ContractQuery{ContractName: "users_v1"})
+			if err != nil {
+				t.Fatalf("LookupContract returned error (mitigations must be non-fatal): %v", err)
+			}
+			if cc.MitigationsMode != tc.wantMode {
+				t.Errorf("MitigationsMode = %q, want %q", cc.MitigationsMode, tc.wantMode)
+			}
+			if cc.Degraded != tc.wantDegraded {
+				t.Errorf("Degraded = %v, want %v", cc.Degraded, tc.wantDegraded)
+			}
+			if len(cc.MitigationPatterns) != tc.wantHits {
+				t.Errorf("len(MitigationPatterns) = %d, want %d", len(cc.MitigationPatterns), tc.wantHits)
+			}
+			if cc.VectorErrorStatus != tc.wantVStatus {
+				t.Errorf("VectorErrorStatus = %d, want %d", cc.VectorErrorStatus, tc.wantVStatus)
+			}
+			if cc.VectorErrorReason != tc.wantVReason {
+				t.Errorf("VectorErrorReason = %q, want %q", cc.VectorErrorReason, tc.wantVReason)
+			}
+			aw.mu.Lock()
+			lastAction := ""
+			if n := len(aw.entries); n > 0 {
+				lastAction = aw.entries[n-1].Action
+			}
+			aw.mu.Unlock()
+			if lastAction != tc.wantAudit {
+				t.Errorf("last audit action = %q, want %q", lastAction, tc.wantAudit)
+			}
+		})
+	}
+}

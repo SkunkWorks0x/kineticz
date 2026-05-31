@@ -119,6 +119,19 @@ func (e *Engine) Diagnose(ctx context.Context, q elastic.ContractQuery, syncStar
 		if err != nil {
 			cspan.SetStatus(codes.Error, err.Error())
 			cspan.RecordError(err)
+		} else if cc != nil && cc.Degraded {
+			// Optional mitigations degraded (BM25 fallback or empty). Record it
+			// on the span without marking ERROR; the repair pipeline continues.
+			cspan.SetAttributes(
+				attribute.Bool("retrieval.degraded", true),
+				attribute.String("retrieval.mode", cc.MitigationsMode),
+			)
+			if cc.VectorErrorStatus != 0 {
+				cspan.SetAttributes(attribute.Int("retrieval.vector_error_status", cc.VectorErrorStatus))
+			}
+			if cc.VectorErrorReason != "" {
+				cspan.SetAttributes(attribute.String("retrieval.vector_error_reason", cc.VectorErrorReason))
+			}
 		}
 		results <- esResult{cc: cc, err: err}
 	}()
