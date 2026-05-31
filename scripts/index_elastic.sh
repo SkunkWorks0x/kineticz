@@ -26,6 +26,15 @@ INFERENCE_ENDPOINT="${ELASTIC_INFERENCE_MODEL:-.multilingual-e5-small-elasticsea
 EMBED_MODEL_ID=".multilingual-e5-small"
 PIPELINE="kineticz-mitigations-embed"
 
+# ML-optional mode (ELASTIC_ML_OPTIONAL=true or the --bm25-only flag) unsets the
+# mitigations default pipeline before seeding, so docs index lexical-only with no
+# E5 inference and no ML node. The pipeline and dense_vector mapping stay defined
+# for explicit ?pipeline= use once ML capacity exists.
+ML_OPTIONAL="${ELASTIC_ML_OPTIONAL:-false}"
+if [[ "${1:-}" == "--bm25-only" ]]; then
+  ML_OPTIONAL=true
+fi
+
 # es METHOD PATH [BODY] - curl wrapper. --fail-with-body makes curl exit non-zero
 # (and print the error body) on HTTP >=400, so set -e aborts the run instead of
 # proceeding past a rejected create.
@@ -120,11 +129,18 @@ es POST "/contracts/_bulk?refresh=wait_for" '{"index":{"_id":"postgres/orders_pg
 {"name":"snowflake/events","yaml":"name: snowflake/events\nversion: 1\ncolumns:\n  - event_id: string\n  - status: string\n  - occurred_at: timestamp\n"}
 '; echo
 
-# 6. Sample mitigations. diff_embedding is computed by the default pipeline from
-#    table_metadata; no vector is sent here.
+# 6. Sample mitigations. By default the index pipeline embeds table_metadata into
+#    diff_embedding on write. In ML-optional mode the default pipeline is unset
+#    just below, so the same docs land lexical-only (no vector, no ML node).
 #    SAMPLE DATA: generated (no fixture was supplied). diff-001..003 mirror the
 #    summaries in internal/elastic/testdata/rrf_search.json.
-echo "[index] indexing sample mitigations (embeddings computed on ingest)..."
+if [[ "${ML_OPTIONAL}" == "true" ]]; then
+  echo "[index] ML-optional: unsetting default_pipeline on mitigations (BM25-only writes)..."
+  es PUT "/mitigations/_settings" '{"index":{"default_pipeline":"_none"}}'; echo
+  echo "[index] indexing sample mitigations (lexical-only, ML-free)..."
+else
+  echo "[index] indexing sample mitigations (embeddings computed on ingest)..."
+fi
 es POST "/mitigations/_bulk?refresh=wait_for" '{"index":{"_id":"diff-001"}}
 {"diff_id":"diff-001","summary":"Add nullable timestamp column with default NULL","columns":"created_at updated_at","table_metadata":"postgres/orders_pg orders schema"}
 {"index":{"_id":"diff-002"}}
