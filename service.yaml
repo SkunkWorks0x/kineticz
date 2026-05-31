@@ -36,7 +36,9 @@ spec:
                   name: GEMINI_PROJECT_ID
                   key: latest
             - name: GEMINI_LOCATION
-              value: us-central1
+              value: global
+            - name: GEMINI_MODEL
+              value: gemini-3.5-flash
             - name: GITLAB_URL
               value: https://gitlab.com
             - name: GITLAB_TOKEN

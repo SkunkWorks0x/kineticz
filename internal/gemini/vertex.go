@@ -41,10 +41,18 @@ type vertexClient struct {
 // one Gemini model). The default Vertex base URL is per-region; baseURL can be
 // overridden for testing.
 func NewVertexClient(httpClient *http.Client, aw audit.Writer, projectID, location, model string, tokenFunc VertexAccessTokenFunc) *vertexClient {
+	// The "global" location has no region prefix: its host is the bare
+	// aiplatform.googleapis.com (global-aiplatform.googleapis.com is not a valid
+	// host). Regional locations keep the {location}- prefix. The request path
+	// still carries locations/<location> in both cases (see Generate).
+	host := fmt.Sprintf("https://%s-aiplatform.googleapis.com", location)
+	if location == "global" {
+		host = "https://aiplatform.googleapis.com"
+	}
 	return &vertexClient{
 		http:      httpClient,
 		audit:     aw,
-		baseURL:   fmt.Sprintf("https://%s-aiplatform.googleapis.com", location),
+		baseURL:   host,
 		projectID: projectID,
 		location:  location,
 		model:     model,
