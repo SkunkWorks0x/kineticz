@@ -41,6 +41,9 @@ func TestDiagnose(t *testing.T) {
 	health := []dynatrace.ConsumerHealth{
 		{Consumer: "service-a", ErrorRate: 0.05, LatencyP95Ms: 120},
 	}
+	// A raw (non-DynatraceError, non-sentinel) error must stay fatal: it is not
+	// a telemetry outage. Used by the decode-style hard-fail case below.
+	errDecode := errors.New("dynatrace: decode dql: unexpected end of JSON")
 
 	cases := []struct {
 		name         string
@@ -100,6 +103,39 @@ func TestDiagnose(t *testing.T) {
 			wantDegraded: true,
 			wantHealth:   0,
 			wantAudits:   []string{"DIAGNOSIS_DEGRADED"},
+		},
+		{
+			name: "dynatrace_http_404_degrades_soft",
+			esMock: &elastic.Mock{
+				LookupContractFn: func(context.Context, elastic.ContractQuery) (*elastic.ContractContext, error) {
+					return contractCtx, nil
+				},
+			},
+			dtMock: &dynatrace.Mock{
+				QueryConsumerHealthFn: func(context.Context, int64, int64) ([]dynatrace.ConsumerHealth, error) {
+					return nil, &dynatrace.DynatraceError{StatusCode: 404, Body: "404 page not found"}
+				},
+			},
+			ctxToken:     "tok-dt-404",
+			wantDegraded: true,
+			wantHealth:   0,
+			wantAudits:   []string{"DIAGNOSIS_DEGRADED"},
+		},
+		{
+			name: "dynatrace_decode_error_is_hard_fail",
+			esMock: &elastic.Mock{
+				LookupContractFn: func(context.Context, elastic.ContractQuery) (*elastic.ContractContext, error) {
+					return contractCtx, nil
+				},
+			},
+			dtMock: &dynatrace.Mock{
+				QueryConsumerHealthFn: func(context.Context, int64, int64) ([]dynatrace.ConsumerHealth, error) {
+					return nil, errDecode
+				},
+			},
+			ctxToken:   "tok-dt-decode",
+			wantErrIs:  errDecode,
+			wantAudits: []string{"DIAGNOSIS_FAILED"},
 		},
 		{
 			name: "dynatrace_correlation_missing_is_hard_fail",
@@ -174,6 +210,9 @@ func TestDiagnose(t *testing.T) {
 				}
 				if res.ContractContext == nil {
 					t.Error("ContractContext is nil on success path")
+				}
+				if vErr := res.Validate(); vErr != nil {
+					t.Errorf("Validate() = %v, want nil (degraded result must validate with nil health)", vErr)
 				}
 			}
 

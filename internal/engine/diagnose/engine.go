@@ -188,11 +188,20 @@ func (e *Engine) Diagnose(ctx context.Context, q elastic.ContractQuery, syncStar
 	}
 
 	if dt.err != nil {
-		if errors.Is(dt.err, dynatrace.ErrTelemetryUnavailable) {
+		var de *dynatrace.DynatraceError
+		if errors.Is(dt.err, dynatrace.ErrTelemetryUnavailable) || errors.As(dt.err, &de) {
 			out.Degraded = true
+			// Transport failure -> UNAVAILABLE; an HTTP-response error (e.g. a
+			// misconfigured Dynatrace URL returning 404) -> DEGRADED. Consumer
+			// health is optional context, so the run continues either way.
+			status := "UNAVAILABLE"
+			if de != nil {
+				status = "DEGRADED"
+				span.SetAttributes(attribute.Int("kineticz.dynatrace_error_status", de.StatusCode))
+			}
 			span.SetAttributes(
 				attribute.Bool("kineticz.degraded", true),
-				attribute.String("kineticz.dynatrace_status", "UNAVAILABLE"),
+				attribute.String("kineticz.dynatrace_status", status),
 			)
 			_ = e.recordAudit(ctx, "DIAGNOSIS_DEGRADED", token, "dynatrace", dt.err.Error())
 			return out, nil
