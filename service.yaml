@@ -11,7 +11,7 @@ spec:
         autoscaling.knative.dev/maxScale: "10"
         run.googleapis.com/execution-environment: gen2
         run.googleapis.com/cpu-throttling: "false"
-        kineticz.dev/deploy-ts: "2026-05-31T06-25"
+        kineticz.dev/deploy-ts: "2026-06-01T06-21"
     spec:
       timeoutSeconds: 300
       containerConcurrency: 80
