@@ -52,7 +52,6 @@ type Deps struct {
 	Repair         *repair.Coordinator
 	Evaluate       *evaluate.Gate
 	Commit         *commit.Coordinator
-	Target         repair.TargetReader
 	PublicKey      ed25519.PublicKey
 	ProjectID      string
 	TargetBranch   string
@@ -206,19 +205,7 @@ func runPipeline(ctx context.Context, d Deps, anomaly fivetran.Anomaly) {
 		return
 	}
 
-	orig, err := d.Target.Read(ctx, targetPath)
-	if err != nil {
-		fail("target_read", err)
-		return
-	}
-
-	patched, err := commit.ApplyDiff(orig, repairRes.PatchDiff)
-	if err != nil {
-		fail("apply_diff", err)
-		return
-	}
-
-	evalRes, err := d.Evaluate.Evaluate(ctx, orig, patched, repairRes.PatchDiff)
+	evalRes, err := d.Evaluate.Evaluate(ctx, repairRes.Orig, repairRes.Patched, repairRes.PatchDiff)
 	if err != nil {
 		fail("evaluate", err)
 		return
@@ -232,7 +219,7 @@ func runPipeline(ctx context.Context, d Deps, anomaly fivetran.Anomaly) {
 		ProjectID:     d.ProjectID,
 		TargetBranch:  d.TargetBranch,
 		FilePath:      targetPath,
-		FileContent:   patched,
+		FileContent:   repairRes.Patched,
 		CommitMessage: "Kineticz auto-patch: " + contractName,
 		MRTitle:       "Auto-patch " + anomaly.ConnectorName + " schema drift",
 		MRDescription: fmt.Sprintf("Anomaly %s triggered by upstream schema change.\n\nDiff:\n```\n%s\n```\n", eventID, repairRes.PatchDiff),
@@ -417,7 +404,7 @@ func buildDeps(ctx context.Context, cfg config) (Deps, func(), error) {
 	}
 
 	diagnoseEngine := diagnose.New(elasticClient, dynatraceClient, writer)
-	repairCoord := repair.New(geminiClient, writer, target)
+	repairCoord := repair.New(geminiClient, writer, target, commit.ApplyDiff)
 	evalGate := evaluate.New(writer, noopIndexer{})
 	commitCoord := commit.New(gitlabClient, writer)
 
@@ -428,7 +415,6 @@ func buildDeps(ctx context.Context, cfg config) (Deps, func(), error) {
 		Repair:         repairCoord,
 		Evaluate:       evalGate,
 		Commit:         commitCoord,
-		Target:         target,
 		PublicKey:      pub,
 		ProjectID:      cfg.GitLabProjectID,
 		TargetBranch:   cfg.GitLabTargetBranch,

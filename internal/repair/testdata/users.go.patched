@@ -1,0 +1,15 @@
+package pipeline
+
+import (
+	"errors"
+	"time"
+)
+
+// ParseUser builds a User from a raw row.
+func ParseUser(row map[string]any) (*User, error) {
+	if row == nil {
+		return nil, errors.New("nil row")
+	}
+	createdAt, _ := row["created_at"].(time.Time)
+	return &User{ID: row["id"].(int64), Email: row["email"].(string), CreatedAt: createdAt}, nil
+}

@@ -24,6 +24,11 @@ const (
 	systemInstruction    = "You are a deterministic patch generator. Output a single-file unified diff in GitLab format. No prose outside the diff."
 )
 
+// bContextInstruction is the held B hardening block (exact path, -U5, verbatim
+// context lines, self-check). Empty until the Codex repro confirms content
+// drift; filled in the follow-up B commit without touching the loop.
+const bContextInstruction = ""
+
 // Sentinel errors for repair outcomes.
 var (
 	ErrMaxIterationsExceeded = errors.New("repair: max iterations exceeded without approval")
@@ -37,10 +42,19 @@ type TargetReader interface {
 	Read(ctx context.Context, path string) ([]byte, error)
 }
 
+// Applier applies a unified diff to orig and returns the patched bytes, or an
+// error if a hunk's context does not match. Injected (commit.ApplyDiff) so the
+// repair package stays decoupled from commit.
+type Applier func(orig, diff []byte) ([]byte, error)
+
 // Result is the approved patch plus iteration metadata. Thought is the final
 // iteration's reasoning block, also written into the REPAIR_APPROVED audit.
+// Orig is the source the winning diff applied against; Patched is the result,
+// so the orchestrator gates and commits without re-reading or re-applying.
 type Result struct {
 	PatchDiff  []byte
+	Patched    []byte
+	Orig       []byte
 	Iterations int
 	Thought    string
 }
@@ -53,16 +67,18 @@ type Coordinator struct {
 	gemini        gemini.Client
 	audit         audit.ThoughtWriter
 	target        TargetReader
+	apply         Applier
 	MaxIterations int
 	ModelName     string
 }
 
 // New wires a Coordinator with the default 4 iterations.
-func New(g gemini.Client, aw audit.ThoughtWriter, tr TargetReader) *Coordinator {
+func New(g gemini.Client, aw audit.ThoughtWriter, tr TargetReader, apply Applier) *Coordinator {
 	return &Coordinator{
 		gemini:        g,
 		audit:         aw,
 		target:        tr,
+		apply:         apply,
 		MaxIterations: DefaultMaxIterations,
 		ModelName:     "gemini-3.5-flash",
 	}
@@ -165,24 +181,34 @@ func (c *Coordinator) Repair(ctx context.Context, diag *diagnose.DiagnosisResult
 			}
 
 			emptyCount = 0
-			reason := validateDiff(files)
-			if reason == "" {
-				iterSpan.SetAttributes(attribute.String("kineticz.iteration_verdict", "APPROVED"))
-				c.writeAudit(iterCtx, "REPAIR_APPROVED", iter, "", "", thought)
-				return iterationOutcome{
-					approved: true,
-					result: &Result{
-						PatchDiff:  diffBytes,
-						Iterations: iter + 1,
-						Thought:    thought,
-					},
-				}
+			if reason := validateDiff(files); reason != "" {
+				iterSpan.SetAttributes(attribute.String("kineticz.iteration_verdict", reason))
+				c.writeAudit(iterCtx, "REPAIR_REJECTED", iter, reason, "", thought)
+				feedback = "previous diff rejected: " + reason
+				return iterationOutcome{}
 			}
 
-			iterSpan.SetAttributes(attribute.String("kineticz.iteration_verdict", reason))
-			c.writeAudit(iterCtx, "REPAIR_REJECTED", iter, reason, "", thought)
-			feedback = "previous diff rejected: " + reason
-			return iterationOutcome{}
+			patched, applyErr := c.apply(target, diffBytes)
+			if applyErr != nil {
+				iterSpan.SetAttributes(attribute.String("kineticz.iteration_verdict", "apply_conflict"))
+				iterSpan.RecordError(applyErr)
+				c.writeAudit(iterCtx, "REPAIR_REJECTED", iter, "apply_conflict", applyErr.Error(), thought)
+				feedback = "previous diff failed to apply: " + applyErr.Error()
+				return iterationOutcome{}
+			}
+
+			iterSpan.SetAttributes(attribute.String("kineticz.iteration_verdict", "APPROVED"))
+			c.writeAudit(iterCtx, "REPAIR_APPROVED", iter, "", "", thought)
+			return iterationOutcome{
+				approved: true,
+				result: &Result{
+					PatchDiff:  diffBytes,
+					Patched:    patched,
+					Orig:       target,
+					Iterations: iter + 1,
+					Thought:    thought,
+				},
+			}
 		}()
 
 		if outcome.hardErr != nil {
@@ -303,6 +329,7 @@ func buildPrompt(diag *diagnose.DiagnosisResult, target []byte, feedback string)
 		b.WriteString(feedback)
 		b.WriteString("\n")
 	}
+	b.WriteString(bContextInstruction)
 	b.WriteString("\nProduce a unified diff that resolves the upstream schema change. Single file only.")
 	return b.String()
 }

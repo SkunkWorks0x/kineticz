@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/bluekeyes/go-gitdiff/gitdiff"
 
+	"github.com/skunkworks0x/kineticz/internal/commit"
 	"github.com/skunkworks0x/kineticz/internal/corr"
 	"github.com/skunkworks0x/kineticz/internal/dynatrace"
 	"github.com/skunkworks0x/kineticz/internal/elastic"
@@ -137,13 +139,13 @@ func TestValidateDiff(t *testing.T) {
 func TestRepair_HappyPath(t *testing.T) {
 	validDiff := loadFixture(t, "valid_single_file.diff")
 	aw := &recordingAudit{}
-	tr := &fakeTarget{content: []byte("package pipeline\n")}
+	tr := &fakeTarget{content: loadFixture(t, "users.go.src")}
 	gm := &gemini.Mock{
 		GenerateFn: func(_ context.Context, _ gemini.GenerateRequest) (*gemini.Response, error) {
 			return responseWithDiff("Step 1: inspect schema.", string(validDiff)), nil
 		},
 	}
-	c := New(gm, aw, tr)
+	c := New(gm, aw, tr, commit.ApplyDiff)
 
 	ctx := corr.WithToken(context.Background(), "tok-happy")
 	res, err := c.Repair(ctx, validDiagnosis(), "internal/pipeline/users.go")
@@ -179,8 +181,8 @@ func TestRepair_RejectedThenApproved(t *testing.T) {
 		},
 	}
 	aw := &recordingAudit{}
-	tr := &fakeTarget{content: []byte("package pipeline\n")}
-	c := New(gm, aw, tr)
+	tr := &fakeTarget{content: loadFixture(t, "users.go.src")}
+	c := New(gm, aw, tr, commit.ApplyDiff)
 
 	res, err := c.Repair(corr.WithToken(context.Background(), "tok-retry"), validDiagnosis(), "internal/pipeline/users.go")
 	if err != nil {
@@ -206,7 +208,7 @@ func TestRepair_TwoConsecutiveEmpty(t *testing.T) {
 	}
 	aw := &recordingAudit{}
 	tr := &fakeTarget{content: []byte("package pipeline\n")}
-	c := New(gm, aw, tr)
+	c := New(gm, aw, tr, commit.ApplyDiff)
 	_, err := c.Repair(corr.WithToken(context.Background(), "tok-empty"), validDiagnosis(), "internal/pipeline/users.go")
 	if !errors.Is(err, ErrTwoConsecutiveEmpty) {
 		t.Fatalf("err = %v, want ErrTwoConsecutiveEmpty", err)
@@ -222,7 +224,7 @@ func TestRepair_MaxIterationsExceeded(t *testing.T) {
 	}
 	aw := &recordingAudit{}
 	tr := &fakeTarget{content: []byte("package pipeline\n")}
-	c := New(gm, aw, tr)
+	c := New(gm, aw, tr, commit.ApplyDiff)
 	_, err := c.Repair(corr.WithToken(context.Background(), "tok-max"), validDiagnosis(), "internal/pipeline/users.go")
 	if !errors.Is(err, ErrMaxIterationsExceeded) {
 		t.Fatalf("err = %v, want ErrMaxIterationsExceeded", err)
@@ -236,7 +238,7 @@ func TestRepair_InvalidDiagnosisResult(t *testing.T) {
 	gm := &gemini.Mock{}
 	aw := &recordingAudit{}
 	tr := &fakeTarget{}
-	c := New(gm, aw, tr)
+	c := New(gm, aw, tr, commit.ApplyDiff)
 	bad := &diagnose.DiagnosisResult{} // missing everything
 	_, err := c.Repair(context.Background(), bad, "x")
 	if err == nil {
@@ -248,7 +250,7 @@ func TestRepair_TargetReadError(t *testing.T) {
 	gm := &gemini.Mock{}
 	aw := &recordingAudit{}
 	tr := &fakeTarget{err: fmt.Errorf("disk gone")}
-	c := New(gm, aw, tr)
+	c := New(gm, aw, tr, commit.ApplyDiff)
 	_, err := c.Repair(corr.WithToken(context.Background(), "tok-disk"), validDiagnosis(), "x")
 	if err == nil {
 		t.Fatal("expected target read error")
@@ -266,14 +268,78 @@ func TestRepair_StripsMarkdownFences(t *testing.T) {
 		},
 	}
 	aw := &recordingAudit{}
-	tr := &fakeTarget{content: []byte("x")}
-	c := New(gm, aw, tr)
+	tr := &fakeTarget{content: loadFixture(t, "users.go.src")}
+	c := New(gm, aw, tr, commit.ApplyDiff)
 	res, err := c.Repair(corr.WithToken(context.Background(), "tok-md"), validDiagnosis(), "x")
 	if err != nil {
 		t.Fatalf("Repair: %v", err)
 	}
 	if res.Iterations != 1 {
 		t.Errorf("Iterations = %d, want 1", res.Iterations)
+	}
+}
+
+// An apply conflict on the first attempt is a soft rejection: the loop feeds
+// the literal gitdiff error back and retries. The second clean diff approves.
+func TestRepair_ApplyConflictRetries(t *testing.T) {
+	src := loadFixture(t, "users.go.src")
+	conflict := string(loadFixture(t, "conflict_context.diff"))
+	valid := string(loadFixture(t, "valid_single_file.diff"))
+	var prompts []string
+	var call int
+	gm := &gemini.Mock{
+		GenerateFn: func(_ context.Context, req gemini.GenerateRequest) (*gemini.Response, error) {
+			prompts = append(prompts, req.UserPrompt)
+			call++
+			if call == 1 {
+				return responseWithDiff("first attempt", conflict), nil
+			}
+			return responseWithDiff("second attempt", valid), nil
+		},
+	}
+	aw := &recordingAudit{}
+	tr := &fakeTarget{content: src}
+	c := New(gm, aw, tr, commit.ApplyDiff)
+
+	res, err := c.Repair(corr.WithToken(context.Background(), "tok-conflict"), validDiagnosis(), "internal/pipeline/users.go")
+	if err != nil {
+		t.Fatalf("Repair: %v", err)
+	}
+	if res.Iterations != 2 {
+		t.Errorf("Iterations = %d, want 2", res.Iterations)
+	}
+	if len(prompts) < 2 || !strings.Contains(prompts[1], "fragment line does not match src line") {
+		t.Errorf("iteration-2 prompt missing apply-conflict feedback; prompts = %q", prompts)
+	}
+	want := []string{"REPAIR_ATTEMPT", "REPAIR_REJECTED", "REPAIR_ATTEMPT", "REPAIR_APPROVED"}
+	if got := aw.actions(); !sameSlice(got, want) {
+		t.Errorf("audit actions = %v, want %v", got, want)
+	}
+}
+
+// A clean diff applies inside the loop; Result carries the source it applied
+// against and the patched bytes, so the orchestrator skips a re-read.
+func TestRepair_AppliesPatchInLoop(t *testing.T) {
+	src := loadFixture(t, "users.go.src")
+	want := loadFixture(t, "users.go.patched")
+	valid := string(loadFixture(t, "valid_single_file.diff"))
+	gm := &gemini.Mock{
+		GenerateFn: func(_ context.Context, _ gemini.GenerateRequest) (*gemini.Response, error) {
+			return responseWithDiff("apply this", valid), nil
+		},
+	}
+	tr := &fakeTarget{content: src}
+	c := New(gm, &recordingAudit{}, tr, commit.ApplyDiff)
+
+	res, err := c.Repair(corr.WithToken(context.Background(), "tok-apply"), validDiagnosis(), "internal/pipeline/users.go")
+	if err != nil {
+		t.Fatalf("Repair: %v", err)
+	}
+	if !bytes.Equal(res.Patched, want) {
+		t.Errorf("Patched mismatch:\n got %q\nwant %q", res.Patched, want)
+	}
+	if !bytes.Equal(res.Orig, src) {
+		t.Errorf("Orig did not equal the read target")
 	}
 }
 
