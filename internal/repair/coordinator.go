@@ -24,11 +24,6 @@ const (
 	systemInstruction    = "You are a deterministic patch generator. Output a single-file unified diff in GitLab format. No prose outside the diff."
 )
 
-// bContextInstruction is the held B hardening block (exact path, -U5, verbatim
-// context lines, self-check). Empty until the Codex repro confirms content
-// drift; filled in the follow-up B commit without touching the loop.
-const bContextInstruction = ""
-
 // Sentinel errors for repair outcomes.
 var (
 	ErrMaxIterationsExceeded = errors.New("repair: max iterations exceeded without approval")
@@ -331,7 +326,6 @@ func buildPrompt(diag *diagnose.DiagnosisResult, target []byte, feedback string)
 		b.WriteString(feedback)
 		b.WriteString("\n")
 	}
-	b.WriteString(bContextInstruction)
 	b.WriteString("\nProduce a unified diff that resolves the upstream schema change. Single file only.")
 	return b.String()
 }
