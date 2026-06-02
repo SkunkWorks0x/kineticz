@@ -133,7 +133,7 @@ func (c *Coordinator) Repair(ctx context.Context, diag *diagnose.DiagnosisResult
 				SystemInstruction: systemInstruction,
 				UserPrompt:        prompt,
 				Temperature:       0.2,
-				MaxOutputTokens:   4096,
+				MaxOutputTokens:   8192,
 			})
 			if err != nil {
 				iterSpan.SetStatus(codes.Error, "gemini: "+err.Error())
