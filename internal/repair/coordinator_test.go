@@ -343,6 +343,67 @@ func TestRepair_AppliesPatchInLoop(t *testing.T) {
 	}
 }
 
+// The prompt anchors hunk line numbers to the file's first line independent of
+// the contract YAML length, so Gemini's headers carry no preamble offset.
+func TestBuildPrompt_AnchorsFileLineNumbers_ContractIndependent(t *testing.T) {
+	src := loadFixture(t, "users.go.src")
+	short := validDiagnosis()
+	short.ContractContext.YAMLDefinition = "name: orders\n"
+	long := validDiagnosis()
+	long.ContractContext.YAMLDefinition = "name: orders\nversion: 2\nowner: data-eng\n"
+
+	p1 := buildPrompt(short, src, "")
+	p3 := buildPrompt(long, src, "")
+
+	const marker = "<<<BEGIN_FILE>>>\n"
+	i1 := strings.Index(p1, marker)
+	i3 := strings.Index(p3, marker)
+	if i1 < 0 || i3 < 0 {
+		t.Fatal("file anchor marker missing from prompt")
+	}
+	if p1[i1:] != p3[i3:] {
+		t.Error("file block varies with contract YAML length; header offset would not be 0")
+	}
+	if !strings.HasPrefix(p1[i1+len(marker):], string(src)) {
+		t.Error("file content does not begin at the anchor")
+	}
+	if !strings.Contains(p1, "Number every diff hunk header from the file's own line 1") {
+		t.Error("anchoring instruction missing")
+	}
+}
+
+// A residual line-number offset (correct content, wrong header position) that
+// anchoring does not catch conflicts under position-strict apply and recovers
+// via the loop's feedback retry.
+func TestRepair_RecoversFromLineNumberOffset(t *testing.T) {
+	src := loadFixture(t, "users.go.src")
+	offset := string(loadFixture(t, "wrong_position.diff"))
+	clean := string(loadFixture(t, "valid_single_file.diff"))
+	var call int
+	gm := &gemini.Mock{
+		GenerateFn: func(_ context.Context, _ gemini.GenerateRequest) (*gemini.Response, error) {
+			call++
+			if call == 1 {
+				return responseWithDiff("offset headers", offset), nil
+			}
+			return responseWithDiff("corrected", clean), nil
+		},
+	}
+	aw := &recordingAudit{}
+	c := New(gm, aw, &fakeTarget{content: src}, commit.ApplyDiff)
+	res, err := c.Repair(corr.WithToken(context.Background(), "tok-offset"), validDiagnosis(), "internal/pipeline/users.go")
+	if err != nil {
+		t.Fatalf("Repair: %v", err)
+	}
+	if res.Iterations != 2 {
+		t.Errorf("Iterations = %d, want 2", res.Iterations)
+	}
+	want := []string{"REPAIR_ATTEMPT", "REPAIR_REJECTED", "REPAIR_ATTEMPT", "REPAIR_APPROVED"}
+	if got := aw.actions(); !sameSlice(got, want) {
+		t.Errorf("audit actions = %v, want %v", got, want)
+	}
+}
+
 func sameSlice(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

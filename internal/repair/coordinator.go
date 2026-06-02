@@ -310,8 +310,10 @@ func buildPrompt(diag *diagnose.DiagnosisResult, target []byte, feedback string)
 	var b strings.Builder
 	b.WriteString("Contract definition:\n")
 	b.WriteString(diag.ContractContext.YAMLDefinition)
-	b.WriteString("\n\nTarget file contents:\n")
+	b.WriteString("\n\nTarget file is between the markers below. Line 1 of the file is the line directly after <<<BEGIN_FILE>>>. Number every diff hunk header from the file's own line 1, not from this prompt.\n")
+	b.WriteString("<<<BEGIN_FILE>>>\n")
 	b.Write(target)
+	b.WriteString("<<<END_FILE>>>\n")
 	b.WriteString("\n\nTop historical mitigation patterns:\n")
 	for i, m := range diag.ContractContext.MitigationPatterns {
 		b.WriteString(fmt.Sprintf("  %d. %s (score=%.4f) — %s\n", i+1, m.DiffID, m.Score, m.Summary))
