@@ -30,11 +30,10 @@ type Result struct {
 	Deduplicated bool
 }
 
-// Gate runs the deterministic local pre-filter. The Arize boolean rubric is
-// now implemented by these local checks (parses-as-Go + preserves-exported-
-// signatures); Arize Phoenix observes the decision via OpenTelemetry spans
-// rather than scoring it via a REST endpoint. Rejected diffs are deduped
-// within this Gate's lifetime.
+// Gate runs the deterministic local patch check: patched bytes must parse as
+// Go and exported function signatures must stay stable. Phoenix observes each
+// verdict over OpenTelemetry spans; it does not score the patch. Rejected
+// diffs are deduped within this Gate's lifetime.
 type Gate struct {
 	audit   audit.Writer
 	indexer RejectedIndexer
