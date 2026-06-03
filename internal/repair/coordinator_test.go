@@ -3,6 +3,7 @@ package repair
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -29,20 +30,34 @@ type recordingAudit struct {
 type recordedEntry struct {
 	Action  string
 	Thought string
+	Payload []byte
 }
 
-func (r *recordingAudit) Append(_ context.Context, action string, _ []byte) error {
+func (r *recordingAudit) Append(_ context.Context, action string, body []byte) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.entries = append(r.entries, recordedEntry{Action: action})
+	r.entries = append(r.entries, recordedEntry{Action: action, Payload: body})
 	return nil
 }
 
-func (r *recordingAudit) AppendWithThought(_ context.Context, action string, _ []byte, thought string) error {
+func (r *recordingAudit) AppendWithThought(_ context.Context, action string, body []byte, thought string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.entries = append(r.entries, recordedEntry{Action: action, Thought: thought})
+	r.entries = append(r.entries, recordedEntry{Action: action, Thought: thought, Payload: body})
 	return nil
+}
+
+func (r *recordingAudit) find(t *testing.T, action string) recordedEntry {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, e := range r.entries {
+		if e.Action == action {
+			return e
+		}
+	}
+	t.Fatalf("no audit entry with action %q", action)
+	return recordedEntry{}
 }
 
 func (r *recordingAudit) actions() []string {
@@ -314,6 +329,44 @@ func TestRepair_ApplyConflictRetries(t *testing.T) {
 	want := []string{"REPAIR_ATTEMPT", "REPAIR_REJECTED", "REPAIR_ATTEMPT", "REPAIR_APPROVED"}
 	if got := aw.actions(); !sameSlice(got, want) {
 		t.Errorf("audit actions = %v, want %v", got, want)
+	}
+}
+
+// An apply_conflict rejection records the diff that failed to apply, so a
+// future failure is diagnosable as a clean offset or a malformed diff.
+func TestRepair_ApplyConflictRecordsDiff(t *testing.T) {
+	src := loadFixture(t, "users.go.src")
+	conflict := string(loadFixture(t, "conflict_context.diff"))
+	valid := string(loadFixture(t, "valid_single_file.diff"))
+	var call int
+	gm := &gemini.Mock{
+		GenerateFn: func(_ context.Context, _ gemini.GenerateRequest) (*gemini.Response, error) {
+			call++
+			if call == 1 {
+				return responseWithDiff("first attempt", conflict), nil
+			}
+			return responseWithDiff("second attempt", valid), nil
+		},
+	}
+	aw := &recordingAudit{}
+	c := New(gm, aw, &fakeTarget{content: src}, commit.ApplyDiff)
+
+	if _, err := c.Repair(corr.WithToken(context.Background(), "tok-diag"), validDiagnosis(), "internal/pipeline/users.go"); err != nil {
+		t.Fatalf("Repair: %v", err)
+	}
+
+	var payload struct {
+		Reason string `json:"reason"`
+		Diff   string `json:"diff"`
+	}
+	if err := json.Unmarshal(aw.find(t, "REPAIR_REJECTED").Payload, &payload); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if payload.Reason != "apply_conflict" {
+		t.Fatalf("reason = %q, want apply_conflict", payload.Reason)
+	}
+	if payload.Diff != conflict {
+		t.Errorf("recorded diff did not match applied diff\n got %q\nwant %q", payload.Diff, conflict)
 	}
 }
 

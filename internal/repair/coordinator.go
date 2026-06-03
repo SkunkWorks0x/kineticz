@@ -187,7 +187,7 @@ func (c *Coordinator) Repair(ctx context.Context, diag *diagnose.DiagnosisResult
 			if applyErr != nil {
 				iterSpan.SetAttributes(attribute.String("kineticz.iteration_verdict", "apply_conflict"))
 				iterSpan.RecordError(applyErr)
-				c.writeAudit(iterCtx, "REPAIR_REJECTED", iter, "apply_conflict", applyErr.Error(), thought)
+				c.writeAudit(iterCtx, "REPAIR_REJECTED", iter, "apply_conflict", applyErr.Error(), thought, string(diffBytes))
 				feedback = "previous diff failed to apply: " + applyErr.Error()
 				return iterationOutcome{}
 			}
@@ -330,13 +330,18 @@ func buildPrompt(diag *diagnose.DiagnosisResult, target []byte, feedback string)
 	return b.String()
 }
 
-func (c *Coordinator) writeAudit(ctx context.Context, action string, iter int, reason, errMsg, thought string) {
+func (c *Coordinator) writeAudit(ctx context.Context, action string, iter int, reason, errMsg, thought string, diff ...string) {
 	payload := map[string]any{"iteration": iter}
 	if reason != "" {
 		payload["reason"] = reason
 	}
 	if errMsg != "" {
 		payload["error"] = errMsg
+	}
+	// Only the apply_conflict caller passes a diff: the applied bytes that
+	// failed, kept so the rejection can be characterized later.
+	if len(diff) > 0 && diff[0] != "" {
+		payload["diff"] = diff[0]
 	}
 	body, _ := json.Marshal(payload)
 	if thought == "" {
