@@ -3,9 +3,9 @@ package gitlab
 import "context"
 
 type Mock struct {
-	CreateCommitFn    func(ctx context.Context, req CommitRequest) (string, error)
-	CreateMRFn        func(ctx context.Context, req MRRequest) (*MRResult, error)
-	GetFileContentFn  func(ctx context.Context, projectID, filePath, ref string) ([]byte, error)
+	CreateCommitFn   func(ctx context.Context, req CommitRequest) (string, error)
+	CreateMRFn       func(ctx context.Context, req MRRequest) (*MRResult, error)
+	GetFileContentFn func(ctx context.Context, projectID, filePath, ref string) ([]byte, error)
 }
 
 func (m *Mock) CreateCommit(ctx context.Context, req CommitRequest) (string, error) {

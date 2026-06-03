@@ -54,8 +54,8 @@ type MRRequest struct {
 }
 
 type MRResult struct {
-	MRIID  int
-	MRURL  string
+	MRIID int
+	MRURL string
 }
 
 type GitLabError struct {

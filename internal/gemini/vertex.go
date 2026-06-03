@@ -25,15 +25,15 @@ import (
 type VertexAccessTokenFunc func(ctx context.Context) (string, error)
 
 type vertexClient struct {
-	http       *http.Client
-	audit      audit.Writer
-	baseURL    string
-	projectID  string
-	location   string
-	model      string
-	tokenFunc  VertexAccessTokenFunc
-	backoff    time.Duration
-	retries    int
+	http      *http.Client
+	audit     audit.Writer
+	baseURL   string
+	projectID string
+	location  string
+	model     string
+	tokenFunc VertexAccessTokenFunc
+	backoff   time.Duration
+	retries   int
 }
 
 // NewVertexClient constructs a Client backed by the Vertex AI Generative AI
@@ -64,9 +64,9 @@ func NewVertexClient(httpClient *http.Client, aw audit.Writer, projectID, locati
 
 // vertexRequest mirrors the Vertex AI generateContent body shape.
 type vertexRequest struct {
-	Contents          []vertexContent   `json:"contents"`
-	SystemInstruction *vertexContent    `json:"systemInstruction,omitempty"`
-	GenerationConfig  vertexGenConfig   `json:"generationConfig"`
+	Contents          []vertexContent `json:"contents"`
+	SystemInstruction *vertexContent  `json:"systemInstruction,omitempty"`
+	GenerationConfig  vertexGenConfig `json:"generationConfig"`
 }
 
 type vertexContent struct {
@@ -80,8 +80,8 @@ type vertexPart struct {
 }
 
 type vertexGenConfig struct {
-	Temperature     float64              `json:"temperature,omitempty"`
-	MaxOutputTokens int                  `json:"maxOutputTokens,omitempty"`
+	Temperature     float64               `json:"temperature,omitempty"`
+	MaxOutputTokens int                   `json:"maxOutputTokens,omitempty"`
 	ThinkingConfig  *vertexThinkingConfig `json:"thinkingConfig,omitempty"`
 }
 
@@ -192,7 +192,7 @@ func (c *vertexClient) recordAudit(ctx context.Context, action string, callErr e
 func buildVertexRequest(req GenerateRequest) vertexRequest {
 	out := vertexRequest{
 		Contents: []vertexContent{{
-			Role: "user",
+			Role:  "user",
 			Parts: []vertexPart{{Text: req.UserPrompt}},
 		}},
 		GenerationConfig: vertexGenConfig{

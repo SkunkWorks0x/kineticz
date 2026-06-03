@@ -13,12 +13,12 @@ import (
 
 func TestDo(t *testing.T) {
 	cases := []struct {
-		name        string
-		handler     http.HandlerFunc
-		maxRetries  int
-		ctxTimeout  time.Duration
-		wantErrIs   error
-		wantStatus  int
+		name         string
+		handler      http.HandlerFunc
+		maxRetries   int
+		ctxTimeout   time.Duration
+		wantErrIs    error
+		wantStatus   int
 		wantAttempts int32
 	}{
 		{
@@ -49,8 +49,8 @@ func TestDo(t *testing.T) {
 			wantAttempts: 3,
 		},
 		{
-			name: "5xx_then_200_succeeds_on_retry",
-			handler: makeFlakyHandler(2),
+			name:         "5xx_then_200_succeeds_on_retry",
+			handler:      makeFlakyHandler(2),
 			maxRetries:   3,
 			wantStatus:   http.StatusOK,
 			wantAttempts: 3,

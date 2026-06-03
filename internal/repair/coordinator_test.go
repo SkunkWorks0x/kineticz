@@ -23,8 +23,8 @@ import (
 )
 
 type recordingAudit struct {
-	mu       sync.Mutex
-	entries  []recordedEntry
+	mu      sync.Mutex
+	entries []recordedEntry
 }
 
 type recordedEntry struct {
