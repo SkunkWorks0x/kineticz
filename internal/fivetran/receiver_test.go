@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -224,6 +225,48 @@ func TestReceiver_PanicInPipelineIsRecoveredAndAudited(t *testing.T) {
 			if e.Action == "PIPELINE_PANICKED" {
 				return
 			}
+		}
+	}
+}
+
+// The recovered PIPELINE_PANICKED entry must carry forensics: a non-empty
+// payload with the event ID and panic message. Guards against regressing
+// anomaly.EventID (the method value) back into the marshalled map, which makes
+// json.Marshal fail and drops the payload.
+func TestReceiver_PanicAuditPayloadCarriesEventIDAndMessage(t *testing.T) {
+	store := &fakeStore{}
+	r := NewReceiver(store, secret, func(context.Context, Anomaly) {
+		panic("simulated downstream crash")
+	}, nil)
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/fivetran", bytes.NewReader([]byte(triggerBody)))
+	req.Header.Set(SignatureHeader, signBody([]byte(triggerBody)))
+	r.ServeHTTP(httptest.NewRecorder(), req)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		for _, e := range store.snapshot() {
+			if e.Action != "PIPELINE_PANICKED" {
+				continue
+			}
+			if len(e.Payload) == 0 {
+				t.Fatal("PIPELINE_PANICKED payload is empty")
+			}
+			var got map[string]any
+			if err := json.Unmarshal(e.Payload, &got); err != nil {
+				t.Fatalf("payload not valid JSON: %v (raw %q)", err, e.Payload)
+			}
+			if got["event_id"] != "sync_end:syn_def456" {
+				t.Errorf("event_id = %v, want sync_end:syn_def456", got["event_id"])
+			}
+			if msg, _ := got["panic"].(string); !strings.Contains(msg, "simulated downstream crash") {
+				t.Errorf("panic = %q, want it to contain the crash message", msg)
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("PIPELINE_PANICKED never written; entries: %v", store.snapshot())
+		case <-time.After(20 * time.Millisecond):
 		}
 	}
 }

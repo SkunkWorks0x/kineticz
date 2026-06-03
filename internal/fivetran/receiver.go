@@ -148,7 +148,7 @@ func (r *Receiver) spawnPipeline(ctx context.Context, anomaly Anomaly) {
 			if p := recover(); p != nil {
 				stack := debug.Stack()
 				payload, _ := json.Marshal(map[string]any{
-					"event_id": anomaly.EventID,
+					"event_id": anomaly.EventID(),
 					"panic":    fmt.Sprintf("%v", p),
 					"stack":    string(stack),
 				})
