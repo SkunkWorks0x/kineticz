@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -46,9 +48,9 @@ func TestPubkeyHandler(t *testing.T) {
 
 func TestHealthHandler(t *testing.T) {
 	cases := []struct {
-		name       string
-		method     string
-		wantStatus int
+		name            string
+		method          string
+		wantStatus      int
 		wantStatusField string
 	}{
 		{"GET_returns_ok", http.MethodGet, http.StatusOK, "ok"},
@@ -84,5 +86,50 @@ func TestGetenvFallback(t *testing.T) {
 	}
 	if got := getenv("KINETICZ_TEST_UNSET_XYZ", "fallback"); got != "fallback" {
 		t.Errorf("getenv unset: %q, want fallback", got)
+	}
+}
+
+func TestValidConnectorName(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		ok   bool
+	}{
+		{"legit", "users", true},
+		{"underscore", "users_pg", true},
+		{"hyphen", "orders-2", true},
+		{"empty", "", false},
+		{"dotdot", "..", false},
+		{"traversal", "../../x", false},
+		{"slash", "a/b", false},
+		{"backslash", `a\b`, false},
+		{"absolute", "/etc/passwd", false},
+		{"dot", "a.b", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validConnectorName(tc.in)
+			if tc.ok && err != nil {
+				t.Errorf("validConnectorName(%q) = %v, want nil", tc.in, err)
+			}
+			if !tc.ok && err == nil {
+				t.Errorf("validConnectorName(%q) = nil, want error", tc.in)
+			}
+		})
+	}
+}
+
+// A validated connector_name resolves under internal/pipeline/; the traversal
+// name the validator rejects would otherwise escape that directory via Join.
+func TestConnectorNameTargetStaysUnderPipeline(t *testing.T) {
+	const base = "internal/pipeline"
+	if got := filepath.Join("internal", "pipeline", "users"+".go"); !strings.HasPrefix(got, base+"/") {
+		t.Errorf("legit target %q escaped %q", got, base)
+	}
+	if got := filepath.Join("internal", "pipeline", "../../x"+".go"); strings.HasPrefix(got, base+"/") {
+		t.Errorf("expected %q to escape %q", got, base)
+	}
+	if err := validConnectorName("../../x"); err == nil {
+		t.Error("validConnectorName must reject the traversal that escapes Join")
 	}
 }

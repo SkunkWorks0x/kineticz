@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"syscall"
 	"time"
 
@@ -150,6 +151,17 @@ func pubkeyHandler(pub ed25519.PublicKey) http.HandlerFunc {
 	}
 }
 
+var connectorNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
+// validConnectorName bounds connector_name to a safe charset so it cannot
+// traverse out of internal/pipeline/ when it forms the commit target path.
+func validConnectorName(name string) error {
+	if !connectorNamePattern.MatchString(name) {
+		return fmt.Errorf("connector_name %q must match [A-Za-z0-9_-]+", name)
+	}
+	return nil
+}
+
 func runPipeline(ctx context.Context, d Deps, anomaly fivetran.Anomaly) {
 	eventID := anomaly.EventID()
 
@@ -174,6 +186,11 @@ func runPipeline(ctx context.Context, d Deps, anomaly fivetran.Anomaly) {
 			"error":    err.Error(),
 		})
 		_ = d.Audit.Append(ctx, "PIPELINE_FAILED", payload)
+	}
+
+	if err := validConnectorName(anomaly.ConnectorName); err != nil {
+		fail("validate_connector", err)
+		return
 	}
 
 	// Real Fivetran webhooks don't carry column-level diffs. Diagnose runs
