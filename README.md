@@ -1,6 +1,6 @@
 # Kineticz
 
-High-performance, deterministic DataOps orchestration. Detects broken data pipelines, diagnoses the root cause with Gemini 3.5 Flash, gates the patch through Arize, and lands it via GitLab merge request. Every step is hash-chained and Ed25519-signed in MongoDB Atlas.
+High-performance, deterministic DataOps orchestration. Detects broken data pipelines, diagnoses the root cause with Gemini 3.5 Flash, gates the patch with a local go/parser + go/ast check, and lands it via GitLab merge request. Arize Phoenix traces every stage over OpenTelemetry. Every step is hash-chained and Ed25519-signed in MongoDB Atlas.
 
 ## Problem
 
