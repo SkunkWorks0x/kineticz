@@ -123,3 +123,101 @@ The two paths are separate, and the rejected-diff indexer is still the no-op.
 The `mitigations` mapping has no rejection field, so if a real indexer replaces
 the no-op, add a `rejection_status` field and a `must_not` filter on the read
 query first.
+
+# Provisioning runbook (Imani)
+
+## 1. Auth — already wired
+
+The client authenticates with an Elastic API key: header
+`Authorization: ApiKey <encoded>` (client.go:336). The value is the base64
+`encoded` field from `POST /_security/api_key`, passed through verbatim
+(client.go:334-336; same value the script uses, index_elastic.sh:21).
+
+Env vars (cmd/kineticz/main.go:309-311):
+
+| Var | Meaning | Default |
+|---|---|---|
+| `ELASTIC_URL` | cluster base URL, no trailing slash | required |
+| `ELASTIC_API_KEY` | base64 `encoded` API key | required |
+| `ELASTIC_INFERENCE_MODEL` | inference endpoint id | `.multilingual-e5-small-elasticsearch` |
+
+**service.yaml cross-check (correction):** both `ELASTIC_URL` (service.yaml:64-68)
+and `ELASTIC_API_KEY` (service.yaml:69-73) are wired as Secret Manager
+`secretKeyRef`s (`key: latest`). The API-key secret is bound today (commit
+`fd008ef`); the "only the URL is wired" assumption is stale, and secret names are
+UPPER_SNAKE, not `kineticz-elastic-url`. Action: ensure the Secret Manager secrets
+`ELASTIC_URL` and `ELASTIC_API_KEY` hold real `latest` versions — no service.yaml
+edit needed. `ELASTIC_INFERENCE_MODEL` is not wired, so the runtime uses the
+default endpoint; add it to service.yaml only if you provision a custom endpoint id.
+
+## 2. Manual Elastic Cloud prerequisites (before the script)
+
+The script cannot create ML capacity. By hand in the deployment first:
+
+- **ML node capacity:** enable Machine Learning / size an ML node (or ML
+  autoscaling). The KNN/inference leg needs it.
+- **E5 model deployment:**
+  - Default endpoint `.multilingual-e5-small-elasticsearch` (9.x preconfigured):
+    the script reuses it (GET → 200). It auto-allocates on first inference when ML
+    capacity exists; otherwise deploy the `.multilingual-e5-small` trained model in
+    Kibana (ML → Trained Models) with **1 allocation, 1 thread**.
+  - Custom endpoint id: the script creates it via `PUT _inference` with
+    `num_allocations:1, num_threads:1` (index_elastic.sh:64-68) — still needs an ML node.
+
+No ML node yet? Run the script `--bm25-only` for a lexical-only demo (step 4).
+
+## 3. What the script creates (`scripts/index_elastic.sh`)
+
+| Step | Action | Lines |
+|---|---|---|
+| 1 | inference endpoint: GET probe, reuse (200) or create (404) with E5 model | 57-72 |
+| 2 | ingest pipeline `kineticz-mitigations-embed` (embeds `table_metadata`→`diff_embedding`) | 74-84 |
+| 3 | `contracts` index (if 404): `name` keyword, `yaml` text | 86-97 |
+| 4 | `mitigations` index (if 404): text fields + `diff_embedding` dense_vector 384, `default_pipeline` | 99-116 |
+| 5 | sample data: 3 contracts + 6 mitigations | 118-156 |
+
+## 4. Run
+
+```sh
+export ELASTIC_URL="https://<deployment>.es.<region>.gcp.cloud.es.io"   # no trailing slash
+export ELASTIC_API_KEY="<base64 encoded from POST /_security/api_key>"
+# optional, only for a custom endpoint id:
+# export ELASTIC_INFERENCE_MODEL="my-e5-endpoint"
+
+./scripts/index_elastic.sh              # full E5 path — ML node required
+./scripts/index_elastic.sh --bm25-only  # OR lexical-only, no ML node
+```
+
+`--bm25-only` (or `ELASTIC_ML_OPTIONAL=true`) unsets the `mitigations`
+`default_pipeline` before seeding, so docs index lexical-only with no E5 and no ML
+node (index_elastic.sh:29-36, 137-139). Query-time RRF still degrades to BM25. The
+API key needs privileges to probe/create inference, create pipelines and indices,
+and bulk index; the script's curl uses `--fail-with-body` and aborts on the first 4xx.
+
+## 5. Verify the KNN leg (no `no_ml_nodes` 429)
+
+Inference probe — confirms the model is allocated on an ML node:
+
+```sh
+curl -sS -H "Authorization: ApiKey $ELASTIC_API_KEY" -H 'Content-Type: application/json' \
+  "$ELASTIC_URL/_inference/text_embedding/.multilingual-e5-small-elasticsearch" \
+  -d '{"input":"postgres/orders_pg orders schema"}'
+```
+
+200 with a 384-float `text_embedding` = ML node up. `429` / "no ml node" = capacity missing.
+
+End-to-end — the client's exact RRF query (client.go:145-178):
+
+```sh
+curl -sS -H "Authorization: ApiKey $ELASTIC_API_KEY" -H 'Content-Type: application/json' \
+  "$ELASTIC_URL/mitigations/_search" -d '{
+  "retriever":{"rrf":{"retrievers":[
+    {"standard":{"query":{"multi_match":{"query":"postgres/orders_pg","fields":["columns","table_metadata"]}}}},
+    {"knn":{"field":"diff_embedding","query_vector_builder":{"text_embedding":{"model_id":".multilingual-e5-small-elasticsearch","model_text":"postgres/orders_pg"}},"k":10,"num_candidates":100}}
+  ],"rank_constant":60,"rank_window_size":100}},"size":3}'
+```
+
+200 with hits (`diff-001/004/006` for orders_pg) = KNN works; the app records
+`ELASTIC_LOOKUP_OK` mode `rrf`. `429` = `no_ml_nodes`, app degrades to
+`bm25_fallback`. Index-time check: `GET /mitigations/_doc/diff-001` →
+`diff_embedding` is 384 floats (index_elastic.sh:160).
