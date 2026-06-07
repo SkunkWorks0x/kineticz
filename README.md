@@ -59,15 +59,19 @@ the full pipeline end-to-end; it is gated behind the `integration` build tag.
 
 ## Partner integrations
 
-| Partner | Role | Integration | MCP |
-|---|---|---|---|
-| Fivetran | Schema-change source | HMAC-verified webhook | n/a (inbound) |
-| Dynatrace | APM + business events | DQL + bizevent ingest, REST | Exposed via `internal/engine/mcp.OutboundTools` |
-| Elastic | RAG via RRF | `_search` retriever block, REST | Exposed via `internal/engine/mcp.OutboundTools` |
-| Gemini 3.5 Flash | Reasoning + patch generation | Vertex AI REST, OAuth | Tool consumer (calls Dynatrace + Elastic via MCP) |
-| Arize | Observability + tracing | OpenTelemetry via Phoenix | Phoenix MCP (trace queries) |
-| GitLab | Patch application | v4 REST: commits + merge_requests | n/a |
-| MongoDB Atlas | Hash-chained audit ledger | mongo-driver v2, ACID transactions | n/a |
+Kineticz orchestrates in Go. The diagnose engine fans Dynatrace and Elastic
+out in two goroutines under one 5-second deadline, then the repair coordinator
+calls Gemini with both results in the prompt for the patch reasoning step.
+
+| Partner | Role | Integration |
+|---|---|---|
+| Fivetran | Schema-change source | HMAC-verified inbound webhook |
+| Dynatrace | Consumer health telemetry | DQL query, REST |
+| Elastic | Contract store + mitigation retrieval (RRF) | `_doc` GET + `_search` retriever block, REST |
+| Gemini 3.5 Flash | Patch reasoning + generation | Vertex AI `generateContent` REST, OAuth |
+| Arize | Observability + tracing | OpenTelemetry via Phoenix |
+| GitLab | Patch application | v4 REST: commits + merge_requests |
+| MongoDB Atlas | Hash-chained audit ledger | mongo-driver v2, ACID transactions |
 
 ## Audit chain
 
