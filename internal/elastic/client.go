@@ -60,25 +60,32 @@ var (
 	ErrElasticUnavailable = errors.New("elastic: service unavailable")
 )
 
+// defaultMitigationTimeout bounds the optional vector (RRF/E5) retrieval leg so
+// a slow E5 cold start cannot consume the diagnose stage's shared 5s deadline.
+// It sits below that deadline, leaving budget for the BM25 fallback.
+const defaultMitigationTimeout = 2 * time.Second
+
 type client struct {
-	http           *http.Client
-	audit          audit.Writer
-	baseURL        string
-	apiKey         string
-	inferenceModel string
-	backoff        time.Duration
-	retries        int
+	http              *http.Client
+	audit             audit.Writer
+	baseURL           string
+	apiKey            string
+	inferenceModel    string
+	backoff           time.Duration
+	retries           int
+	mitigationTimeout time.Duration
 }
 
 func NewClient(httpClient *http.Client, aw audit.Writer, baseURL, apiKey, inferenceModel string) *client {
 	return &client{
-		http:           httpClient,
-		audit:          aw,
-		baseURL:        baseURL,
-		apiKey:         apiKey,
-		inferenceModel: inferenceModel,
-		backoff:        100 * time.Millisecond,
-		retries:        3,
+		http:              httpClient,
+		audit:             aw,
+		baseURL:           baseURL,
+		apiKey:            apiKey,
+		inferenceModel:    inferenceModel,
+		backoff:           100 * time.Millisecond,
+		retries:           3,
+		mitigationTimeout: defaultMitigationTimeout,
 	}
 }
 
@@ -246,7 +253,16 @@ func parseMitigationHits(body []byte) ([]Mitigation, error) {
 // or "empty_optional"; vStatus/vReason carry the vector leg's failure for
 // telemetry when it fell back.
 func (c *client) retrieveMitigations(ctx context.Context, signature string) (hits []Mitigation, mode string, vStatus int, vReason string) {
-	hits, err := c.searchMitigationsRRF(ctx, signature)
+	// The vector leg gets its own sub-budget so a slow E5 inference times out
+	// here instead of failing the whole diagnosis on the shared deadline. BM25
+	// then runs under the parent ctx with the remaining budget.
+	rrfCtx := ctx
+	if c.mitigationTimeout > 0 {
+		var cancel context.CancelFunc
+		rrfCtx, cancel = context.WithTimeout(ctx, c.mitigationTimeout)
+		defer cancel()
+	}
+	hits, err := c.searchMitigationsRRF(rrfCtx, signature)
 	if err == nil {
 		return hits, "rrf", 0, ""
 	}
@@ -261,6 +277,9 @@ func (c *client) retrieveMitigations(ctx context.Context, signature string) (hit
 // classifyVectorError turns the RRF failure into a status code and a short,
 // non-sensitive reason. It never returns the full Elastic error body.
 func classifyVectorError(err error) (status int, reason string) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return 0, "vector_timeout"
+	}
 	var ee *ElasticError
 	if errors.As(err, &ee) {
 		status = ee.StatusCode

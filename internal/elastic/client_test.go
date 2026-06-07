@@ -182,6 +182,74 @@ func TestLookupContract(t *testing.T) {
 	}
 }
 
+func TestLookupContract_SlowVectorLegTimesOutAndFallsBackToBM25(t *testing.T) {
+	contractFix := loadFixture(t, "contract.json")
+	searchFix := loadFixture(t, "rrf_search.json")
+
+	var mu sync.Mutex
+	var bm25Calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/contracts/_doc/"):
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(contractFix)
+		case r.Method == http.MethodPost && r.URL.Path == "/mitigations/_search":
+			var m map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&m)
+			if _, isRRF := m["retriever"]; isRRF {
+				// E5 cold-start inference that outlives the vector sub-timeout.
+				time.Sleep(200 * time.Millisecond)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(searchFix)
+				return
+			}
+			mu.Lock()
+			bm25Calls++
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(searchFix)
+		default:
+			http.Error(w, "unexpected target: "+r.RequestURI, http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	c := &client{
+		http:              server.Client(),
+		audit:             &recordingAudit{},
+		baseURL:           server.URL,
+		backoff:           1 * time.Millisecond,
+		retries:           3,
+		mitigationTimeout: 30 * time.Millisecond,
+	}
+
+	ctx := corr.WithToken(context.Background(), "tok-slowvec")
+	start := time.Now()
+	cc, err := c.LookupContract(ctx, ContractQuery{ContractName: "users_v1"})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("LookupContract must not fail when only the optional vector leg is slow: %v", err)
+	}
+	if elapsed > 150*time.Millisecond {
+		t.Errorf("LookupContract took %s; the slow vector leg should not block past the sub-timeout", elapsed)
+	}
+	if cc.MitigationsMode != "bm25_fallback" {
+		t.Errorf("MitigationsMode = %q, want bm25_fallback (slow RRF degrades to BM25)", cc.MitigationsMode)
+	}
+	if len(cc.MitigationPatterns) != 3 {
+		t.Errorf("want 3 BM25 mitigations after vector timeout, got %d", len(cc.MitigationPatterns))
+	}
+	if cc.VectorErrorReason != "vector_timeout" {
+		t.Errorf("VectorErrorReason = %q, want vector_timeout", cc.VectorErrorReason)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if bm25Calls != 1 {
+		t.Errorf("BM25 fallback call count = %d, want 1", bm25Calls)
+	}
+}
+
 func TestLookupContract_ContractNameWithSlashIsPathEscaped(t *testing.T) {
 	contractFix := loadFixture(t, "contract.json")
 	searchFix := loadFixture(t, "rrf_search.json")
