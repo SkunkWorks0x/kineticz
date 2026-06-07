@@ -64,10 +64,60 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
+	if len(os.Args) > 1 && os.Args[1] == "verify" {
+		if err := runVerify(context.Background()); err != nil {
+			slog.Error("verify failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := run(); err != nil {
 		slog.Error("kineticz failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+// runVerify walks the full audit chain and reports linkage, hash, and
+// signature results. It needs MONGO_URI, MONGO_DB (default kineticz), and
+// KINETICZ_ED25519_SEED; the server env set is not required. Exit 0 = intact.
+// Tail truncation is outside the walk: compare the printed entry count against
+// an external anchor to detect it.
+func runVerify(ctx context.Context) error {
+	uri := os.Getenv("MONGO_URI")
+	if uri == "" {
+		return errors.New("verify: MONGO_URI is required")
+	}
+	dbName := getenv("MONGO_DB", "kineticz")
+	seedHex := os.Getenv("KINETICZ_ED25519_SEED")
+	if len(seedHex) != hex.EncodedLen(ed25519.SeedSize) {
+		return fmt.Errorf("verify: KINETICZ_ED25519_SEED must be %d hex characters (32 bytes)", hex.EncodedLen(ed25519.SeedSize))
+	}
+	seed, err := hex.DecodeString(seedHex)
+	if err != nil {
+		return fmt.Errorf("verify: decode KINETICZ_ED25519_SEED: %w", err)
+	}
+	pub := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+
+	client, err := mongo.Connect(options.Client().ApplyURI(uri))
+	if err != nil {
+		return fmt.Errorf("verify: mongo connect: %w", err)
+	}
+	defer func() { _ = client.Disconnect(context.Background()) }()
+
+	entries, err := auditmongo.ReadAllEntries(ctx, client, dbName)
+	if err != nil {
+		return fmt.Errorf("verify: read ledger: %w", err)
+	}
+
+	rep := audit.VerifyChain(entries, pub)
+	if !rep.Valid {
+		return fmt.Errorf("verify: chain INVALID at entry %d (id=%s): %s [%d entries walked]",
+			rep.FailedIndex, rep.FailedID, rep.Reason, rep.Entries)
+	}
+	fmt.Printf("chain intact: %d entries; linkage, hashes, and signatures verified\n", rep.Entries)
+	fmt.Println("tail truncation is outside this walk; compare the entry count against an external anchor")
+	return nil
 }
 
 func run() error {

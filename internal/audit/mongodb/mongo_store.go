@@ -130,6 +130,31 @@ func (m *mongoStore) HasEntry(ctx context.Context, eventID string) (bool, error)
 	return true, nil
 }
 
+// ReadAllEntries returns every audit_ledger entry sorted oldest-first for a
+// full-chain walk by audit.VerifyChain. Read-only; takes the raw client so the
+// verify subcommand runs without a Writer or signing key.
+func ReadAllEntries(ctx context.Context, client *mongo.Client, dbName string) ([]audit.Entry, error) {
+	coll := client.Database(dbName).Collection(CollectionName)
+	opts := options.Find().SetSort(bson.D{{Key: "timestamp", Value: 1}})
+	cur, err := coll.Find(ctx, bson.D{}, opts)
+	if err != nil {
+		return nil, fmt.Errorf("audit/mongodb: find all: %w", err)
+	}
+	defer cur.Close(ctx)
+	var out []audit.Entry
+	for cur.Next(ctx) {
+		var doc entryDoc
+		if err := cur.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("audit/mongodb: decode entry: %w", err)
+		}
+		out = append(out, *doc.toEntry())
+	}
+	if err := cur.Err(); err != nil {
+		return nil, fmt.Errorf("audit/mongodb: cursor: %w", err)
+	}
+	return out, nil
+}
+
 func (m *mongoStore) InTransaction(ctx context.Context, fn func(ctx context.Context, s chainStore) error) error {
 	sess, err := m.client.StartSession()
 	if err != nil {

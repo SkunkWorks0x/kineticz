@@ -83,3 +83,33 @@ func Verify(e Entry, prevHash []byte, pub ed25519.PublicKey) error {
 	}
 	return nil
 }
+
+// ChainReport is the outcome of a full-chain walk.
+type ChainReport struct {
+	Entries     int    // entries in the walked ledger
+	Valid       bool   // every entry passed linkage, hash, and signature
+	FailedIndex int    // index of the first failing entry; -1 when Valid
+	FailedID    string // ID of the first failing entry; empty when Valid
+	Reason      string // first failure detail; empty when Valid
+}
+
+// VerifyChain walks entries oldest-first and runs Verify on each against its
+// predecessor's hash (genesis verifies against nil). It detects byte tampering,
+// re-signing with a foreign key, reordering, and interior deletion. Tail
+// truncation leaves an internally valid shorter chain; detecting it requires an
+// external head anchor.
+func VerifyChain(entries []Entry, pub ed25519.PublicKey) ChainReport {
+	var prev []byte
+	for i := range entries {
+		if err := Verify(entries[i], prev, pub); err != nil {
+			return ChainReport{
+				Entries:     len(entries),
+				FailedIndex: i,
+				FailedID:    entries[i].ID,
+				Reason:      err.Error(),
+			}
+		}
+		prev = entries[i].Hash
+	}
+	return ChainReport{Entries: len(entries), Valid: true, FailedIndex: -1}
+}
