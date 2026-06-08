@@ -23,6 +23,7 @@ import (
 	"github.com/skunkworks0x/kineticz/internal/fivetran"
 	"github.com/skunkworks0x/kineticz/internal/gemini"
 	"github.com/skunkworks0x/kineticz/internal/gitlab"
+	"github.com/skunkworks0x/kineticz/internal/phoenix"
 	"github.com/skunkworks0x/kineticz/internal/repair"
 )
 
@@ -193,6 +194,100 @@ done:
 		}
 		if !found {
 			t.Errorf("missing required audit action %q. saw: %v", w, actions)
+		}
+	}
+}
+
+// A dead Phoenix MCP server (spawn failure) must not touch the apply path: the
+// pipeline still completes and the diagnose stage records the degraded mode.
+func TestFullPipeline_PhoenixDead(t *testing.T) {
+	store := &mockStore{}
+
+	esMock := &elastic.Mock{
+		LookupContractFn: func(context.Context, elastic.ContractQuery) (*elastic.ContractContext, error) {
+			return &elastic.ContractContext{YAMLDefinition: "name: users\n"}, nil
+		},
+	}
+	dtMock := &dynatrace.Mock{
+		QueryConsumerHealthFn: func(context.Context, int64, int64) ([]dynatrace.ConsumerHealth, error) {
+			return []dynatrace.ConsumerHealth{{Consumer: "svc-a", ErrorRate: 0.01, LatencyP95Ms: 100}}, nil
+		},
+	}
+	gMock := &gemini.Mock{
+		GenerateFn: func(context.Context, gemini.GenerateRequest) (*gemini.Response, error) {
+			return &gemini.Response{Candidates: []gemini.Candidate{{
+				Content: gemini.Content{Parts: []gemini.Part{{Text: intDiff}}},
+			}}}, nil
+		},
+	}
+	glMock := &gitlab.Mock{
+		CreateCommitFn: func(context.Context, gitlab.CommitRequest) (string, error) { return "sha-dead-phoenix", nil },
+		CreateMRFn: func(context.Context, gitlab.MRRequest) (*gitlab.MRResult, error) {
+			return &gitlab.MRResult{MRIID: 7, MRURL: "https://gitlab.example/mr/7"}, nil
+		},
+	}
+
+	// NodeDialer pointed at a binary that does not exist: connect fails, the
+	// client reconnects once, fails again, and the leg degrades.
+	deadPhoenix := phoenix.New(phoenix.NodeDialer("/nonexistent/kineticz-node", "/nonexistent/index.js", nil), "default")
+
+	deps := Deps{
+		EventStore:     store,
+		Audit:          store,
+		Diagnose:       diagnose.New(esMock, dtMock, store, diagnose.WithPhoenix(deadPhoenix, "default")),
+		Repair:         repair.New(gMock, store, &stubTarget{content: []byte(intOrigFile)}, commit.ApplyDiff),
+		Evaluate:       evaluate.New(store, intIndexer{}),
+		Commit:         commit.New(glMock, store),
+		ProjectID:      "kineticz/pipelines",
+		TargetBranch:   "main",
+		FivetranSecret: intSecret,
+	}
+
+	handler := WireHandler(deps)
+	mac := hmac.New(sha256.New, []byte(intSecret))
+	mac.Write([]byte(intWebhookBody))
+	sig := hex.EncodeToString(mac.Sum(nil))
+
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/fivetran", bytes.NewReader([]byte(intWebhookBody)))
+	req.Header.Set(fivetran.SignatureHeader, sig)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202: %s", rec.Code, rec.Body.String())
+	}
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatalf("pipeline did not complete. actions: %v", store.snapshot())
+		case <-time.After(50 * time.Millisecond):
+		}
+		done := false
+		for _, a := range store.snapshot() {
+			if a == "PIPELINE_COMPLETE" {
+				done = true
+			}
+			if a == "PIPELINE_FAILED" {
+				t.Fatalf("pipeline failed with dead Phoenix. actions: %v", store.snapshot())
+			}
+		}
+		if done {
+			break
+		}
+	}
+
+	actions := store.snapshot()
+	for _, w := range []string{"DIAGNOSIS_OK", "PHOENIX_HISTORY_DEGRADED", "PIPELINE_COMPLETE"} {
+		found := false
+		for _, a := range actions {
+			if a == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("missing audit action %q with dead Phoenix. saw: %v", w, actions)
 		}
 	}
 }
