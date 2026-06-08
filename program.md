@@ -7,7 +7,7 @@ Kineticz is an orchestration engine that detects broken data pipelines, diagnose
 
 ### Core Loop
 1. **Detect**: A Fivetran webhook delivers a schema-change event. The receiver verifies HMAC-SHA256, deduplicates by event ID, mints a CorrelationToken, and hands off to a background pipeline.
-2. **Diagnose**: The diagnose engine fans out two parallel Go calls under a 5-second timeout: Dynatrace for live consumer health, Elastic for the contract and historical mitigations. Both results feed the repair prompt.
+2. **Diagnose**: The diagnose engine fans out two parallel Go calls under a 5-second timeout: Dynatrace for live consumer health, Elastic for the contract and historical mitigations. An optional third leg reads this contract's prior repair traces from Arize Phoenix through the Phoenix MCP server (`get-spans`) under a 2-second budget; the engine makes this MCP call as deterministic orchestration, not Gemini routing tools. Dynatrace, Elastic, and any prior repairs feed the repair prompt. The Phoenix leg degrades to no history on any failure and never blocks the apply path.
 3. **Propose**: Gemini generates a candidate code patch as a unified diff, parsed and validated for single-file, non-binary, non-empty, traversal-free hunks.
 4. **Gate**: A local deterministic evaluator decides pass or fail. The patched bytes must parse as Go (go/parser) and exported function signatures must stay unchanged (go/ast). Binary pass/fail. No soft scores. Phoenix records the verdict as a trace span; it observes the decision and does not make it.
 5. **Apply**: The patch lands as a GitLab merge request only after passing the local gate.
@@ -20,13 +20,13 @@ Kineticz is an orchestration engine that detects broken data pipelines, diagnose
 | Gemini 3.5 Flash | Patch reasoning + generation  | Vertex AI generateContent REST               |
 | Dynatrace        | Live consumer health          | DQL query on failure events                  |
 | Elastic          | Historical pipeline memory    | BM25 + KNN over Reciprocal Rank Fusion       |
-| Arize Phoenix    | Observability                 | OpenTelemetry trace export                   |
+| Arize Phoenix    | Observability + self-introspection | OTel trace export + Phoenix MCP get-spans |
 | GitLab           | Patch application             | v4 REST: branch commit + merge request       |
 | MongoDB Atlas    | Tamper-evident audit log      | Hash-chained, Ed25519-signed, ACID writes    |
 
 ### Key Design Constraints
 - **Local deterministic gate**: The evaluator returns true or false from go/parser and go/ast checks. No probability thresholds, no confidence scores. The gate runs in-process, not in a remote service.
-- **Phoenix observes, does not evaluate**: Arize Phoenix ingests OpenTelemetry spans for every pipeline stage. It records what happened. It does not gate patches.
+- **Phoenix observes and informs, does not evaluate**: Arize Phoenix ingests OpenTelemetry spans for every pipeline stage and records what happened. At diagnosis the engine reads prior repair spans back through the Phoenix MCP server to inform the next patch. Phoenix does not gate patches; the local go/parser + go/ast check is the only gate.
 - **Parallel fan-out**: The diagnose engine calls Dynatrace and Elastic at once in two goroutines. Elastic failure is a hard fail; Dynatrace failure is a soft fail (Degraded mode).
 - **Hash-chained audit**: Every entry references the previous entry's hash. A break in the chain is detectable.
 - **Ed25519 signatures**: Each audit entry is signed. The signing key identifies which Kineticz instance wrote it. The seed is loaded from KINETICZ_ED25519_SEED so restarts continue the chain.
@@ -41,7 +41,7 @@ Kineticz is an orchestration engine that detects broken data pipelines, diagnose
 Schema-change event
     → Fivetran webhook (HMAC-verified)
     → audit: FIVETRAN_RECEIVED
-    → diagnose fan-out (parallel goroutines: Dynatrace health + Elastic contract/history)
+    → diagnose fan-out (parallel goroutines: Dynatrace health + Elastic contract/history + Phoenix MCP prior repairs)
     → Gemini 3.5 Flash patch generation
     → candidate unified diff
     → local gate (parses-as-Go + preserves exported signatures)

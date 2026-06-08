@@ -1,6 +1,6 @@
 # Kineticz
 
-High-performance, deterministic DataOps orchestration. Detects broken data pipelines, diagnoses the root cause with Gemini 3.5 Flash, gates the patch with a local go/parser + go/ast check, and lands it via GitLab merge request. Arize Phoenix traces every stage over OpenTelemetry. Every step is hash-chained and Ed25519-signed in MongoDB Atlas.
+High-performance, deterministic DataOps orchestration. Detects broken data pipelines, diagnoses the root cause with Gemini 3.5 Flash, gates the patch with a local go/parser + go/ast check, and lands it via GitLab merge request. Arize Phoenix traces every stage over OpenTelemetry, and at diagnosis Kineticz reads its own prior repair traces back through the Phoenix MCP server to inform the next patch. Every step is hash-chained and Ed25519-signed in MongoDB Atlas.
 
 ## Problem
 
@@ -27,7 +27,9 @@ flowchart LR
     C -->|file + MR| GL[GitLab]
     GL -.->|MR URL| C
     C -->|PIPELINE_COMPLETE| MG
-    FR -.->|OTel traces| PH[Arize Phoenix Observability]
+    FR -.->|OTel traces| PH[Arize Phoenix]
+    D -->|get-spans via Phoenix MCP| PH
+    PH -.->|prior repair traces| D
 ```
 
 ## Quickstart
@@ -47,9 +49,9 @@ the full pipeline end-to-end; it is gated behind the `integration` build tag.
 
 **Detect.** Fivetran webhook delivers a schema-change event. `fivetran.Receiver` verifies HMAC-SHA256 against the shared secret, deduplicates by event ID against MongoDB, mints a `CorrelationToken`, and writes `FIVETRAN_RECEIVED` before handing off to a background pipeline goroutine.
 
-**Diagnose.** `diagnose.Engine` fans out two calls under a 5-second timeout via a buffered channel of capacity 2. Elastic returns the contract YAML and top-3 historical mitigations via Reciprocal Rank Fusion (BM25 on column names + KNN on diff embeddings, `rank_constant=60`). Dynatrace returns downstream consumer health via DQL. Elastic failure is hard fail; Dynatrace `ErrTelemetryUnavailable` is soft fail (Degraded mode).
+**Diagnose.** `diagnose.Engine` fans out two calls under a 5-second timeout via a buffered channel of capacity 2. Elastic returns the contract YAML and top-3 historical mitigations via Reciprocal Rank Fusion (BM25 on column names + KNN on diff embeddings, `rank_constant=60`). Dynatrace returns downstream consumer health via DQL. Elastic failure is hard fail; Dynatrace `ErrTelemetryUnavailable` is soft fail (Degraded mode). An optional third leg reads this contract's prior repair traces from Arize Phoenix through the Phoenix MCP server (`get-spans` over stdio), filters them by contract name, and attaches the verdict and iteration count of each earlier attempt. The diagnose engine makes this call as deterministic orchestration; Gemini does not route it. The leg runs under its own 2-second budget and degrades to no history on any failure, leaving the apply path unchanged.
 
-**Repair.** `repair.Coordinator` runs up to 4 iterations. Each iteration refreshes the target file buffer, prompts Gemini 3.5 Flash with contract + target + mitigations + previous feedback, parses the response with `bluekeyes/go-gitdiff`, and rejects on multi-file, binary, empty hunks, path traversal, or two consecutive empty responses.
+**Repair.** `repair.Coordinator` runs up to 4 iterations. Each iteration refreshes the target file buffer, prompts Gemini 3.5 Flash with contract + target + mitigations + prior repair outcomes (when Phoenix returned any) + previous feedback, parses the response with `bluekeyes/go-gitdiff`, and rejects on multi-file, binary, empty hunks, path traversal, or two consecutive empty responses.
 
 **Evaluate.** `evaluate.Gate` runs the local pre-filter first: patched bytes must parse as Go (`go/parser`) and exported function signatures must remain unchanged (`go/ast`). Local BLOCK skips downstream stages entirely. On local pass, Phoenix records the verdict as a trace span for observability. Rejected diffs are deduplicated by SHA-256 and indexed into Elastic in a detached goroutine.
 
@@ -60,8 +62,11 @@ the full pipeline end-to-end; it is gated behind the `integration` build tag.
 ## Partner integrations
 
 Kineticz orchestrates in Go. The diagnose engine fans Dynatrace and Elastic
-out in two goroutines under one 5-second deadline, then the repair coordinator
-calls Gemini with both results in the prompt for the patch reasoning step.
+out in two goroutines under one 5-second deadline and, when configured, calls
+the Phoenix MCP server for this contract's prior repair traces as an optional
+enrichment leg. The repair coordinator then calls Gemini with the results in
+the prompt for the patch reasoning step. The Phoenix MCP call is orchestration
+calling MCP, not Gemini routing tools.
 
 | Partner | Role | Integration |
 |---|---|---|
@@ -69,7 +74,7 @@ calls Gemini with both results in the prompt for the patch reasoning step.
 | Dynatrace | Consumer health telemetry | DQL query, REST |
 | Elastic | Contract store + mitigation retrieval (RRF) | `_doc` GET + `_search` retriever block, REST |
 | Gemini 3.5 Flash | Patch reasoning + generation | Vertex AI `generateContent` REST, OAuth |
-| Arize | Observability + tracing | OpenTelemetry via Phoenix |
+| Arize | Observability + diagnosis-time self-introspection | OpenTelemetry trace export + Phoenix MCP `get-spans` over stdio |
 | GitLab | Patch application | v4 REST: commits + merge_requests |
 | MongoDB Atlas | Hash-chained audit ledger | mongo-driver v2, ACID transactions |
 
