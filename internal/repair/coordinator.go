@@ -90,7 +90,12 @@ func (c *Coordinator) Repair(ctx context.Context, diag *diagnose.DiagnosisResult
 
 	ctx, span := arize.Tracer().Start(ctx, "kineticz.repair")
 	defer span.End()
-	span.SetAttributes(attribute.String("kineticz.gemini_model", c.ModelName))
+	span.SetAttributes(
+		attribute.String("kineticz.gemini_model", c.ModelName),
+		// Stamp the contract so a later diagnose can query this span by name and
+		// filter on it (the Phoenix self-introspection leg).
+		attribute.String("kineticz.contract_name", diag.ContractName),
+	)
 	tok, _ := corr.FromContext(ctx)
 	if tok != "" {
 		span.SetAttributes(attribute.String("kineticz.correlation_token", string(tok)))
@@ -319,6 +324,12 @@ func buildPrompt(diag *diagnose.DiagnosisResult, target []byte, feedback string)
 		b.WriteString("\nConsumer health (impacted services):\n")
 		for _, h := range diag.ConsumerHealth {
 			b.WriteString(fmt.Sprintf("  - %s: error_rate=%.4f latency_p95_ms=%.1f\n", h.Consumer, h.ErrorRate, h.LatencyP95Ms))
+		}
+	}
+	if len(diag.PriorRepairs) > 0 {
+		b.WriteString("\nPrior repair attempts for this contract:\n")
+		for _, p := range diag.PriorRepairs {
+			b.WriteString(fmt.Sprintf("  - %s: verdict=%s iterations=%d\n", p.When, p.Verdict, p.Iterations))
 		}
 	}
 	if feedback != "" {

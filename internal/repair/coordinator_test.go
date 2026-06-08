@@ -425,6 +425,29 @@ func TestBuildPrompt_AnchorsFileLineNumbers_ContractIndependent(t *testing.T) {
 	}
 }
 
+func TestBuildPrompt_IncludesPriorRepairs(t *testing.T) {
+	src := loadFixture(t, "users.go.src")
+	d := validDiagnosis()
+	d.PriorRepairs = []diagnose.PriorRepair{
+		{Verdict: "MAX_ITERATIONS", Iterations: 4, When: "2026-06-06T10:00:00Z"},
+	}
+	p := buildPrompt(d, src, "")
+	if !strings.Contains(p, "Prior repair attempts for this contract") {
+		t.Errorf("prior-repairs section missing:\n%s", p)
+	}
+	if !strings.Contains(p, "verdict=MAX_ITERATIONS") || !strings.Contains(p, "iterations=4") {
+		t.Errorf("prior-repair detail missing:\n%s", p)
+	}
+}
+
+func TestBuildPrompt_OmitsPriorRepairsWhenEmpty(t *testing.T) {
+	src := loadFixture(t, "users.go.src")
+	p := buildPrompt(validDiagnosis(), src, "")
+	if strings.Contains(p, "Prior repair attempts") {
+		t.Errorf("prior-repairs section present with no history:\n%s", p)
+	}
+}
+
 // A residual line-number offset (correct content, wrong header position) that
 // anchoring does not catch conflicts under position-strict apply and recovers
 // via the loop's feedback retry.
