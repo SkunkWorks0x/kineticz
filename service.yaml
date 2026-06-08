@@ -61,6 +61,17 @@ spec:
                 secretKeyRef:
                   name: PHOENIX_API_KEY
                   key: latest
+            # PHOENIX_HOST is the Phoenix app URL with the space path, distinct
+            # from the OTLP collector endpoint above (no /v1/traces). The MCP
+            # self-introspection leg spawns phoenix-mcp against it. Replace
+            # your-space before deploy. Unset/placeholder leaves the leg degraded
+            # and the apply path unchanged.
+            - name: PHOENIX_HOST
+              value: https://app.phoenix.arize.com/s/your-space
+            # Phoenix project the diagnose leg queries for prior repair spans.
+            # Must match the project Kineticz's OTLP traces land in.
+            - name: PHOENIX_PROJECT
+              value: default
             - name: ELASTIC_URL
               valueFrom:
                 secretKeyRef:
