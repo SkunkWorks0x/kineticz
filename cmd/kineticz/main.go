@@ -35,6 +35,7 @@ import (
 	"github.com/skunkworks0x/kineticz/internal/fivetran"
 	"github.com/skunkworks0x/kineticz/internal/gemini"
 	"github.com/skunkworks0x/kineticz/internal/gitlab"
+	"github.com/skunkworks0x/kineticz/internal/phoenix"
 	"github.com/skunkworks0x/kineticz/internal/repair"
 )
 
@@ -42,6 +43,12 @@ const (
 	shutdownTimeout = 30 * time.Second
 	metaCollection  = "kineticz_meta"
 	signingKeyDocID = "signing_key"
+
+	// phoenix-mcp runs as a node subprocess. These paths match the runtime
+	// image: the distroless nodejs22 node binary and the baked phoenix-mcp
+	// entrypoint (see Dockerfile).
+	phoenixNodeBin = "/nodejs/bin/node"
+	phoenixEntry   = "/app/node_modules/@arizeai/phoenix-mcp/build/index.js"
 )
 
 // Deps is the wired set of orchestration components consumed by WireHandler.
@@ -333,6 +340,8 @@ type config struct {
 	GitLabTargetBranch    string
 	PhoenixEndpoint       string
 	PhoenixAPIKey         string
+	PhoenixHost           string
+	PhoenixProject        string
 	ElasticURL            string
 	ElasticAPIKey         string
 	ElasticInferenceModel string
@@ -356,6 +365,8 @@ func loadConfig() (config, error) {
 		GitLabTargetBranch:    getenv("GITLAB_TARGET_BRANCH", "main"),
 		PhoenixEndpoint:       os.Getenv("PHOENIX_COLLECTOR_ENDPOINT"),
 		PhoenixAPIKey:         os.Getenv("PHOENIX_API_KEY"),
+		PhoenixHost:           os.Getenv("PHOENIX_HOST"),
+		PhoenixProject:        getenv("PHOENIX_PROJECT", "default"),
 		ElasticURL:            os.Getenv("ELASTIC_URL"),
 		ElasticAPIKey:         os.Getenv("ELASTIC_API_KEY"),
 		ElasticInferenceModel: getenv("ELASTIC_INFERENCE_MODEL", ".multilingual-e5-small-elasticsearch"),
@@ -412,6 +423,7 @@ func logStartup(cfg config) {
 		"gitlab_project", cfg.GitLabProjectID,
 		"gitlab_target_branch", cfg.GitLabTargetBranch,
 		"phoenix_endpoint", cfg.PhoenixEndpoint,
+		"phoenix_introspection", cfg.PhoenixHost != "",
 		"elastic_url", cfg.ElasticURL,
 		"dynatrace_url", cfg.DynatraceURL,
 	)
@@ -428,9 +440,13 @@ func buildDeps(ctx context.Context, cfg config) (Deps, func(), error) {
 		return Deps{}, nil, fmt.Errorf("arize tracer provider: %w", err)
 	}
 
+	var phoenixClient phoenix.Client
 	cleanup := func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		if phoenixClient != nil {
+			_ = phoenixClient.Close()
+		}
 		_ = traceShutdown(shutdownCtx)
 		_ = mongoClient.Disconnect(shutdownCtx)
 	}
@@ -470,7 +486,22 @@ func buildDeps(ctx context.Context, cfg config) (Deps, func(), error) {
 		targetBranch: cfg.GitLabTargetBranch,
 	}
 
-	diagnoseEngine := diagnose.New(elasticClient, dynatraceClient, writer)
+	// Phoenix self-introspection is optional. With PHOENIX_HOST set, the
+	// diagnose stage spawns the phoenix-mcp node subprocess and reads this
+	// contract's prior repair traces. Unset leaves the Elastic+Dynatrace path
+	// untouched.
+	var diagOpts []diagnose.Option
+	if cfg.PhoenixHost != "" {
+		mcpEnv := append(os.Environ(),
+			"PHOENIX_HOST="+cfg.PhoenixHost,
+			"PHOENIX_API_KEY="+cfg.PhoenixAPIKey,
+			"PHOENIX_PROJECT="+cfg.PhoenixProject,
+		)
+		phoenixClient = phoenix.New(phoenix.NodeDialer(phoenixNodeBin, phoenixEntry, mcpEnv), cfg.PhoenixProject)
+		diagOpts = append(diagOpts, diagnose.WithPhoenix(phoenixClient, cfg.PhoenixProject))
+	}
+
+	diagnoseEngine := diagnose.New(elasticClient, dynatraceClient, writer, diagOpts...)
 	repairCoord := repair.New(geminiClient, writer, target, commit.ApplyDiff)
 	evalGate := evaluate.New(writer, noopIndexer{})
 	commitCoord := commit.New(gitlabClient, writer)
