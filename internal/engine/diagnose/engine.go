@@ -9,16 +9,25 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/skunkworks0x/kineticz/internal/arize"
 	"github.com/skunkworks0x/kineticz/internal/audit"
 	"github.com/skunkworks0x/kineticz/internal/corr"
 	"github.com/skunkworks0x/kineticz/internal/dynatrace"
 	"github.com/skunkworks0x/kineticz/internal/elastic"
+	"github.com/skunkworks0x/kineticz/internal/phoenix"
 )
 
 // DefaultTimeout caps the combined fan-out time for Elastic + Dynatrace.
 const DefaultTimeout = 5 * time.Second
+
+// DefaultPhoenixTimeout bounds the optional Phoenix self-introspection leg so a
+// slow or dead MCP subprocess cannot extend the diagnose path.
+const DefaultPhoenixTimeout = 2 * time.Second
+
+// priorRepairLookback bounds how far back the Phoenix leg scans repair traces.
+const priorRepairLookback = 7 * 24 * time.Hour
 
 // DiagnosisResult is what Diagnose returns on success or graceful degradation.
 // Degraded == true means Dynatrace failed softly; ConsumerHealth is nil and
@@ -28,6 +37,20 @@ type DiagnosisResult struct {
 	ConsumerHealth   []dynatrace.ConsumerHealth
 	Degraded         bool
 	CorrelationToken corr.CorrelationToken
+	// ContractName identifies the contract under repair. Repair stamps it on its
+	// span so a later diagnose can query Phoenix for this contract's history.
+	ContractName string
+	// PriorRepairs summarizes this contract's earlier repair attempts, read from
+	// Phoenix. Empty when Phoenix is disabled, unreachable, or has no history.
+	PriorRepairs []PriorRepair
+}
+
+// PriorRepair is one earlier repair attempt on the same contract, summarized
+// from a kineticz.repair span.
+type PriorRepair struct {
+	Verdict    string
+	Iterations int
+	When       string
 }
 
 // Validation errors. DiagnosisResult crosses the engine boundary into repair
@@ -67,16 +90,38 @@ type Engine struct {
 	dynatrace dynatrace.Client
 	audit     audit.Writer
 	timeout   time.Duration
+	// Phoenix self-introspection leg. Optional: nil phoenix disables the leg
+	// entirely, leaving the Elastic + Dynatrace path untouched.
+	phoenix        phoenix.Client
+	phoenixProject string
+	phoenixTimeout time.Duration
+}
+
+// Option configures optional Engine legs.
+type Option func(*Engine)
+
+// WithPhoenix enables the self-introspection leg: the diagnose stage reads this
+// contract's prior repair traces from Phoenix and attaches them to the result.
+func WithPhoenix(c phoenix.Client, project string) Option {
+	return func(e *Engine) {
+		e.phoenix = c
+		e.phoenixProject = project
+	}
 }
 
 // New wires an Engine with the default 5-second fan-out timeout.
-func New(es elastic.Client, dt dynatrace.Client, aw audit.Writer) *Engine {
-	return &Engine{
-		elastic:   es,
-		dynatrace: dt,
-		audit:     aw,
-		timeout:   DefaultTimeout,
+func New(es elastic.Client, dt dynatrace.Client, aw audit.Writer, opts ...Option) *Engine {
+	e := &Engine{
+		elastic:        es,
+		dynatrace:      dt,
+		audit:          aw,
+		timeout:        DefaultTimeout,
+		phoenixTimeout: DefaultPhoenixTimeout,
 	}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e
 }
 
 type esResult struct {
@@ -87,6 +132,11 @@ type esResult struct {
 type dtResult struct {
 	ch  []dynatrace.ConsumerHealth
 	err error
+}
+
+type phoenixResult struct {
+	priors []PriorRepair
+	mode   string
 }
 
 // Diagnose performs the parallel fan-out and applies the Partial Success
@@ -103,6 +153,11 @@ func (e *Engine) Diagnose(ctx context.Context, q elastic.ContractQuery, syncStar
 		attribute.String("kineticz.contract_name", q.ContractName),
 		attribute.String("kineticz.correlation_token", string(token)),
 	)
+
+	// The Phoenix leg runs off the parent ctx with its own short budget, so it
+	// is independent of the Elastic + Dynatrace fan-out deadline and can never
+	// trip the diagnose timeout. Its result is attached on the non-error returns.
+	phoenixCh := e.launchPhoenix(ctx, q.ContractName)
 
 	timeoutCtx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
@@ -180,6 +235,7 @@ func (e *Engine) Diagnose(ctx context.Context, q elastic.ContractQuery, syncStar
 	out := &DiagnosisResult{
 		ContractContext:  es.cc,
 		CorrelationToken: token,
+		ContractName:     q.ContractName,
 	}
 
 	// Record Elastic confidence regardless of Dynatrace outcome.
@@ -203,6 +259,7 @@ func (e *Engine) Diagnose(ctx context.Context, q elastic.ContractQuery, syncStar
 				attribute.Bool("kineticz.degraded", true),
 				attribute.String("kineticz.dynatrace_status", status),
 			)
+			e.attachPhoenix(ctx, span, out, phoenixCh, token)
 			_ = e.recordAudit(ctx, "DIAGNOSIS_DEGRADED", token, "dynatrace", dt.err.Error())
 			return out, nil
 		}
@@ -218,8 +275,120 @@ func (e *Engine) Diagnose(ctx context.Context, q elastic.ContractQuery, syncStar
 		attribute.Bool("kineticz.degraded", false),
 		attribute.String("kineticz.dynatrace_status", "OK"),
 	)
+	e.attachPhoenix(ctx, span, out, phoenixCh, token)
 	_ = e.recordAudit(ctx, "DIAGNOSIS_OK", token, "", "")
 	return out, nil
+}
+
+// launchPhoenix starts the self-introspection leg, or returns nil when Phoenix
+// is disabled. The goroutine owns its context's cancel so the bounded budget is
+// released as soon as the query finishes.
+func (e *Engine) launchPhoenix(ctx context.Context, contract string) <-chan phoenixResult {
+	if e.phoenix == nil {
+		return nil
+	}
+	ch := make(chan phoenixResult, 1)
+	pctx, pcancel := context.WithTimeout(ctx, e.phoenixTimeout)
+	go func() {
+		defer pcancel()
+		priors, mode := e.queryPriorRepairs(pctx, contract)
+		ch <- phoenixResult{priors: priors, mode: mode}
+	}()
+	return ch
+}
+
+// queryPriorRepairs reads this contract's prior repair spans from Phoenix. It
+// never returns an error: on any failure it reports the empty_optional mode and
+// no priors, mirroring the Elastic mitigations fallback.
+func (e *Engine) queryPriorRepairs(ctx context.Context, contract string) ([]PriorRepair, string) {
+	ctx, span := arize.Tracer().Start(ctx, "phoenix.query_prior_repairs")
+	defer span.End()
+	span.SetAttributes(
+		attribute.String("openinference.span.kind", "TOOL"),
+		attribute.String("tool.name", "phoenix.get_spans"),
+	)
+	spans, err := e.phoenix.QuerySpans(ctx, phoenix.SpanQuery{
+		Project:            e.phoenixProject,
+		Names:              []string{"kineticz.repair"},
+		StartTime:          time.Now().Add(-priorRepairLookback).UTC().Format(time.RFC3339),
+		IncludeAnnotations: true,
+		Limit:              50,
+	})
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		span.RecordError(err)
+		span.SetAttributes(attribute.String("retrieval.mode", "empty_optional"))
+		return nil, "empty_optional"
+	}
+	priors := summarizePriorRepairs(spans, contract)
+	span.SetAttributes(
+		attribute.String("retrieval.mode", "phoenix_history"),
+		attribute.Int("kineticz.phoenix_prior_count", len(priors)),
+	)
+	return priors, "phoenix_history"
+}
+
+// attachPhoenix waits for the leg's result (bounded by its own budget), records
+// the mode on the span, and writes the PHOENIX_HISTORY_OK / _DEGRADED audit. A
+// nil channel means the leg is disabled; nothing is attached or audited.
+func (e *Engine) attachPhoenix(ctx context.Context, span trace.Span, out *DiagnosisResult, ch <-chan phoenixResult, token corr.CorrelationToken) {
+	if ch == nil {
+		return
+	}
+	var pr phoenixResult
+	select {
+	case pr = <-ch:
+	case <-ctx.Done():
+		pr = phoenixResult{mode: "empty_optional"}
+	}
+	out.PriorRepairs = pr.priors
+	span.SetAttributes(
+		attribute.String("kineticz.phoenix_mode", pr.mode),
+		attribute.Int("kineticz.phoenix_prior_count", len(pr.priors)),
+	)
+	action := "PHOENIX_HISTORY_OK"
+	if pr.mode != "phoenix_history" {
+		action = "PHOENIX_HISTORY_DEGRADED"
+	}
+	_ = e.recordAudit(ctx, action, token, "phoenix", "")
+}
+
+// summarizePriorRepairs keeps the repair spans whose contract matches and folds
+// each into a PriorRepair. Attribute values arrive as JSON scalars, so verdict
+// and iteration count are coerced per key.
+func summarizePriorRepairs(spans []phoenix.Span, contract string) []PriorRepair {
+	var out []PriorRepair
+	for _, s := range spans {
+		if asString(s.Attributes["kineticz.contract_name"]) != contract {
+			continue
+		}
+		out = append(out, PriorRepair{
+			Verdict:    asString(s.Attributes["kineticz.final_verdict"]),
+			Iterations: asInt(s.Attributes["kineticz.iteration_count"]),
+			When:       s.StartTime,
+		})
+	}
+	return out
+}
+
+func asString(v any) string {
+	s, _ := v.(string)
+	return s
+}
+
+func asInt(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	}
+	return 0
 }
 
 func (e *Engine) recordAudit(ctx context.Context, action string, token corr.CorrelationToken, scope, errMsg string) error {

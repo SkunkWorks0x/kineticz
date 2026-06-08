@@ -10,6 +10,7 @@ import (
 	"github.com/skunkworks0x/kineticz/internal/corr"
 	"github.com/skunkworks0x/kineticz/internal/dynatrace"
 	"github.com/skunkworks0x/kineticz/internal/elastic"
+	"github.com/skunkworks0x/kineticz/internal/phoenix"
 )
 
 type recordingAudit struct {
@@ -30,6 +31,15 @@ func (r *recordingAudit) snapshot() []string {
 	out := make([]string, len(r.actions))
 	copy(out, r.actions)
 	return out
+}
+
+func (r *recordingAudit) has(action string) bool {
+	for _, a := range r.snapshot() {
+		if a == action {
+			return true
+		}
+	}
+	return false
 }
 
 func TestDiagnose(t *testing.T) {
@@ -327,5 +337,97 @@ func TestDiagnose_Timeout(t *testing.T) {
 	got := aw.snapshot()
 	if len(got) == 0 || got[0] != "DIAGNOSIS_FAILED" {
 		t.Fatalf("audits = %v, want first DIAGNOSIS_FAILED", got)
+	}
+}
+
+func okMocks(cc *elastic.ContractContext, health []dynatrace.ConsumerHealth) (*elastic.Mock, *dynatrace.Mock) {
+	return &elastic.Mock{
+			LookupContractFn: func(context.Context, elastic.ContractQuery) (*elastic.ContractContext, error) {
+				return cc, nil
+			},
+		}, &dynatrace.Mock{
+			QueryConsumerHealthFn: func(context.Context, int64, int64) ([]dynatrace.ConsumerHealth, error) {
+				return health, nil
+			},
+		}
+}
+
+func TestDiagnose_PhoenixPriorRepairs(t *testing.T) {
+	es, dt := okMocks(
+		&elastic.ContractContext{YAMLDefinition: "name: orders\n"},
+		[]dynatrace.ConsumerHealth{{Consumer: "svc", ErrorRate: 0.01, LatencyP95Ms: 100}},
+	)
+	pmock := &phoenix.Mock{
+		QuerySpansFn: func(_ context.Context, q phoenix.SpanQuery) ([]phoenix.Span, error) {
+			return []phoenix.Span{
+				{Name: "kineticz.repair", StartTime: "2026-06-06T10:00:00Z", Attributes: map[string]any{
+					"kineticz.contract_name": "salesforce/orders", "kineticz.final_verdict": "MAX_ITERATIONS", "kineticz.iteration_count": 4}},
+				{Name: "kineticz.repair", StartTime: "2026-06-05T09:00:00Z", Attributes: map[string]any{
+					"kineticz.contract_name": "postgres/users", "kineticz.final_verdict": "APPROVED", "kineticz.iteration_count": 1}},
+			}, nil
+		},
+	}
+	aw := &recordingAudit{}
+	e := &Engine{
+		elastic: es, dynatrace: dt, audit: aw, timeout: 2 * time.Second,
+		phoenix: pmock, phoenixProject: "default", phoenixTimeout: time.Second,
+	}
+	ctx := corr.WithToken(context.Background(), "tok-phoenix")
+	q := elastic.ContractQuery{ContractName: "salesforce/orders", Columns: []string{"id"}}
+
+	res, err := e.Diagnose(ctx, q, 0, 1000)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if len(res.PriorRepairs) != 1 {
+		t.Fatalf("PriorRepairs = %+v, want 1 (filtered by contract_name)", res.PriorRepairs)
+	}
+	if res.PriorRepairs[0].Verdict != "MAX_ITERATIONS" || res.PriorRepairs[0].Iterations != 4 {
+		t.Errorf("prior = %+v, want verdict=MAX_ITERATIONS iterations=4", res.PriorRepairs[0])
+	}
+	if res.ContractName != "salesforce/orders" {
+		t.Errorf("ContractName = %q", res.ContractName)
+	}
+	if !aw.has("PHOENIX_HISTORY_OK") {
+		t.Errorf("audits = %v, want PHOENIX_HISTORY_OK", aw.snapshot())
+	}
+	if !aw.has("DIAGNOSIS_OK") {
+		t.Errorf("audits = %v, want DIAGNOSIS_OK", aw.snapshot())
+	}
+}
+
+func TestDiagnose_PhoenixDegradesSoftly(t *testing.T) {
+	es, dt := okMocks(
+		&elastic.ContractContext{YAMLDefinition: "name: orders\n"},
+		[]dynatrace.ConsumerHealth{{Consumer: "svc", ErrorRate: 0.01, LatencyP95Ms: 100}},
+	)
+	pmock := &phoenix.Mock{
+		QuerySpansFn: func(context.Context, phoenix.SpanQuery) ([]phoenix.Span, error) {
+			return nil, &phoenix.PhoenixError{Op: "connect", Err: errors.New("npx spawn failed")}
+		},
+	}
+	aw := &recordingAudit{}
+	e := &Engine{
+		elastic: es, dynatrace: dt, audit: aw, timeout: 2 * time.Second,
+		phoenix: pmock, phoenixProject: "default", phoenixTimeout: time.Second,
+	}
+	ctx := corr.WithToken(context.Background(), "tok-phoenix-dead")
+	q := elastic.ContractQuery{ContractName: "salesforce/orders"}
+
+	res, err := e.Diagnose(ctx, q, 0, 1000)
+	if err != nil {
+		t.Fatalf("dead Phoenix must not error diagnose: %v", err)
+	}
+	if len(res.PriorRepairs) != 0 {
+		t.Errorf("PriorRepairs = %+v, want empty on degrade", res.PriorRepairs)
+	}
+	if res.ContractContext == nil {
+		t.Error("apply path broken: ContractContext nil")
+	}
+	if !aw.has("PHOENIX_HISTORY_DEGRADED") {
+		t.Errorf("audits = %v, want PHOENIX_HISTORY_DEGRADED", aw.snapshot())
+	}
+	if !aw.has("DIAGNOSIS_OK") {
+		t.Errorf("audits = %v, want DIAGNOSIS_OK (apply path unaffected)", aw.snapshot())
 	}
 }
