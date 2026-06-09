@@ -119,6 +119,27 @@ func TestValidConnectorName(t *testing.T) {
 	}
 }
 
+func TestMRDescription(t *testing.T) {
+	diff := []byte("--- a/x.go\n+++ b/x.go\n@@ -1 +1 @@\n-a\n+b\n")
+
+	t.Run("with_priors_names_the_phoenix_mcp_count", func(t *testing.T) {
+		got := mrDescription("evt:1", diff, 2)
+		if !strings.Contains(got, "Prior repair attempts considered: 2 (read back from Arize Phoenix via MCP)") {
+			t.Errorf("priors line missing:\n%s", got)
+		}
+		if !strings.Contains(got, "Anomaly evt:1") || !strings.Contains(got, string(diff)) {
+			t.Errorf("anomaly line or diff missing:\n%s", got)
+		}
+	})
+
+	t.Run("without_priors_omits_the_line", func(t *testing.T) {
+		got := mrDescription("evt:1", diff, 0)
+		if strings.Contains(got, "Prior repair attempts considered") {
+			t.Errorf("priors line present with zero priors:\n%s", got)
+		}
+	})
+}
+
 // A validated connector_name resolves under internal/pipeline/; the traversal
 // name the validator rejects would otherwise escape that directory via Join.
 func TestConnectorNameTargetStaysUnderPipeline(t *testing.T) {

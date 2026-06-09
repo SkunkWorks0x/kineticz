@@ -331,13 +331,14 @@ func buildPrompt(diag *diagnose.DiagnosisResult, target []byte, feedback string)
 		for _, p := range diag.PriorRepairs {
 			b.WriteString(fmt.Sprintf("  - %s: verdict=%s iterations=%d\n", p.When, p.Verdict, p.Iterations))
 		}
+		b.WriteString("Treat APPROVED attempts as precedent. Treat MAX_ITERATIONS and HARD_FAIL attempts as failed approaches; do not repeat a failing approach.\n")
 	}
 	if feedback != "" {
 		b.WriteString("\nFeedback from previous attempt: ")
 		b.WriteString(feedback)
 		b.WriteString("\n")
 	}
-	b.WriteString("\nProduce a unified diff that resolves the upstream schema change. Single file only.")
+	b.WriteString("\nProduce a unified diff that resolves the upstream schema change. Single file only. Keep exported function signatures unchanged; the gate rejects any diff that changes them.")
 	return b.String()
 }
 

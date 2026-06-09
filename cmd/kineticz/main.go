@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"syscall"
 	"time"
 
@@ -296,7 +297,7 @@ func runPipeline(ctx context.Context, d Deps, anomaly fivetran.Anomaly) {
 		FileContent:   repairRes.Patched,
 		CommitMessage: "Kineticz auto-patch: " + contractName,
 		MRTitle:       "Auto-patch " + anomaly.ConnectorName + " schema drift",
-		MRDescription: fmt.Sprintf("Anomaly %s triggered by upstream schema change.\n\nDiff:\n```\n%s\n```\n", eventID, repairRes.PatchDiff),
+		MRDescription: mrDescription(eventID, repairRes.PatchDiff, len(diag.PriorRepairs)),
 	})
 	if err != nil {
 		fail("commit", err)
@@ -311,6 +312,19 @@ func runPipeline(ctx context.Context, d Deps, anomaly fivetran.Anomaly) {
 		"branch":     mr.Branch,
 	})
 	_ = d.Audit.Append(ctx, "PIPELINE_COMPLETE", payload)
+}
+
+// mrDescription renders the MR body. The priors line surfaces the Phoenix MCP
+// self-introspection in GitLab, where a reviewer sees it without opening the
+// trace.
+func mrDescription(eventID string, diff []byte, priorCount int) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Anomaly %s triggered by upstream schema change.\n\n", eventID)
+	if priorCount > 0 {
+		fmt.Fprintf(&b, "Prior repair attempts considered: %d (read back from Arize Phoenix via MCP).\n\n", priorCount)
+	}
+	fmt.Fprintf(&b, "Diff:\n```\n%s\n```\n", diff)
+	return b.String()
 }
 
 // gitlabFileReader implements repair.TargetReader against the GitLab

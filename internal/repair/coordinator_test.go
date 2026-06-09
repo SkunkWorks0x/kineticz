@@ -438,6 +438,12 @@ func TestBuildPrompt_IncludesPriorRepairs(t *testing.T) {
 	if !strings.Contains(p, "verdict=MAX_ITERATIONS") || !strings.Contains(p, "iterations=4") {
 		t.Errorf("prior-repair detail missing:\n%s", p)
 	}
+	if !strings.Contains(p, "do not repeat a failing approach") {
+		t.Errorf("history is listed without guidance on how to use it:\n%s", p)
+	}
+	if !strings.Contains(p, "Treat APPROVED attempts as precedent") {
+		t.Errorf("APPROVED-precedent guidance missing:\n%s", p)
+	}
 }
 
 func TestBuildPrompt_OmitsPriorRepairsWhenEmpty(t *testing.T) {
@@ -445,6 +451,17 @@ func TestBuildPrompt_OmitsPriorRepairsWhenEmpty(t *testing.T) {
 	p := buildPrompt(validDiagnosis(), src, "")
 	if strings.Contains(p, "Prior repair attempts") {
 		t.Errorf("prior-repairs section present with no history:\n%s", p)
+	}
+	if strings.Contains(p, "failing approach") {
+		t.Errorf("history guidance present with no history:\n%s", p)
+	}
+}
+
+func TestBuildPrompt_StatesGateRule(t *testing.T) {
+	src := loadFixture(t, "users.go.src")
+	p := buildPrompt(validDiagnosis(), src, "")
+	if !strings.Contains(p, "Keep exported function signatures unchanged") {
+		t.Errorf("gate rule missing from prompt; first-iteration rejections follow:\n%s", p)
 	}
 }
 
