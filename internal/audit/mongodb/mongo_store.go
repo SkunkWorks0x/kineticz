@@ -99,6 +99,19 @@ func (m *mongoStore) Latest(ctx context.Context) (*audit.Entry, error) {
 	return doc.toEntry(), nil
 }
 
+func (m *mongoStore) Penultimate(ctx context.Context) (*audit.Entry, error) {
+	opts := options.FindOne().SetSort(bson.D{{Key: "timestamp", Value: -1}}).SetSkip(1)
+	var doc entryDoc
+	err := m.coll.FindOne(ctx, bson.D{}, opts).Decode(&doc)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, ErrEmpty
+	}
+	if err != nil {
+		return nil, fmt.Errorf("audit/mongodb: find penultimate: %w", err)
+	}
+	return doc.toEntry(), nil
+}
+
 func (m *mongoStore) Insert(ctx context.Context, e *audit.Entry) error {
 	if _, err := m.coll.InsertOne(ctx, entryToDoc(e)); err != nil {
 		if mongo.IsDuplicateKeyError(err) {

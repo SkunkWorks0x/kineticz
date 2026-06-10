@@ -25,6 +25,9 @@ var ErrEmpty = errors.New("audit/mongodb: chain is empty")
 // substitute an in-memory store that preserves the same atomic semantics.
 type chainStore interface {
 	Latest(ctx context.Context) (*audit.Entry, error)
+	// Penultimate returns the second-newest entry, or ErrEmpty when the ledger
+	// has fewer than two entries. LoadHead uses it to verify the head's link.
+	Penultimate(ctx context.Context) (*audit.Entry, error)
 	Insert(ctx context.Context, e *audit.Entry) error
 	InTransaction(ctx context.Context, fn func(ctx context.Context, s chainStore) error) error
 	HasEntry(ctx context.Context, eventID string) (bool, error)
@@ -47,10 +50,10 @@ func NewWriter(store chainStore, priv ed25519.PrivateKey) *Writer {
 	return &Writer{store: store, priv: priv}
 }
 
-// LoadHead reads the most recent entry and verifies its signature against pub.
-// Returns the head entry, or ErrEmpty if the ledger is fresh. Callers should
-// invoke this on startup to detect a tampered or corrupted chain before
-// appending new entries.
+// LoadHead reads the most recent entry and verifies its hash, signature, and
+// link to its predecessor against pub. Returns the head entry, or ErrEmpty if
+// the ledger is fresh. Callers should invoke this on startup to detect a
+// tampered or corrupted chain before appending new entries.
 func (w *Writer) LoadHead(ctx context.Context, pub ed25519.PublicKey) (*audit.Entry, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -58,7 +61,25 @@ func (w *Writer) LoadHead(ctx context.Context, pub ed25519.PublicKey) (*audit.En
 	if err != nil {
 		return nil, err
 	}
-	if err := audit.Verify(*head, head.PreviousHash, pub); err != nil {
+	// Verify against the real predecessor's hash. Checking the head against
+	// its own claimed PreviousHash passes on an interior deletion at the head;
+	// a genesis head verifies against nil.
+	var prevHash []byte
+	prev, err := w.store.Penultimate(ctx)
+	switch {
+	case errors.Is(err, ErrEmpty):
+	case err != nil:
+		return nil, err
+	case prev.Timestamp.Equal(head.Timestamp):
+		// Millisecond-truncated timestamps can tie, and the timestamp sort
+		// then gives no deterministic predecessor. Keep the hash and signature
+		// checks but skip the link comparison rather than refuse startup on
+		// ordering noise.
+		prevHash = head.PreviousHash
+	default:
+		prevHash = prev.Hash
+	}
+	if err := audit.Verify(*head, prevHash, pub); err != nil {
 		return nil, fmt.Errorf("audit/mongodb: head verification failed: %w", err)
 	}
 	return head, nil

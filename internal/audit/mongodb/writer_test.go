@@ -33,6 +33,13 @@ func (s *fakeStore) Latest(_ context.Context) (*audit.Entry, error) {
 	return s.entries[len(s.entries)-1], nil
 }
 
+func (s *fakeStore) Penultimate(_ context.Context) (*audit.Entry, error) {
+	if len(s.entries) < 2 {
+		return nil, ErrEmpty
+	}
+	return s.entries[len(s.entries)-2], nil
+}
+
 func (s *fakeStore) Insert(_ context.Context, e *audit.Entry) error {
 	s.insertCalls++
 	if s.insertErr != nil {
@@ -309,6 +316,69 @@ func TestLoadHead(t *testing.T) {
 		}
 		if head.Action != "BOOTSTRAP" {
 			t.Errorf("Action = %q, want BOOTSTRAP", head.Action)
+		}
+	})
+
+	t.Run("two_entry_chain_head_verifies_against_predecessor", func(t *testing.T) {
+		fs := &fakeStore{}
+		w := NewWriter(fs, priv)
+		ctx := corr.WithToken(context.Background(), "tok-two")
+		if err := w.Append(ctx, "FIRST", []byte("a")); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+		if err := w.Append(ctx, "SECOND", []byte("b")); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+		head, err := w.LoadHead(ctx, pub)
+		if err != nil {
+			t.Fatalf("LoadHead: %v", err)
+		}
+		if head.Action != "SECOND" {
+			t.Errorf("Action = %q, want SECOND", head.Action)
+		}
+	})
+
+	// mk hand-builds a signed entry so subtests control timestamps; Append
+	// stamps time.Now and in-memory appends land in the same millisecond.
+	mk := func(action string, prevHash []byte, ts time.Time) *audit.Entry {
+		e := &audit.Entry{ID: action, Action: action, Payload: []byte(action), PreviousHash: prevHash, Timestamp: ts}
+		audit.Chain(e, priv)
+		return e
+	}
+	t0 := time.Now().UTC().Truncate(time.Millisecond)
+
+	t.Run("interior_deletion_at_head_breaks_link", func(t *testing.T) {
+		a := mk("A", nil, t0)
+		b := mk("B", a.Hash, t0.Add(time.Millisecond))
+		c := mk("C", b.Hash, t0.Add(2*time.Millisecond))
+		// B is deleted. The head's hash and signature still verify, so only a
+		// check against the real predecessor's hash can catch this.
+		fs := &fakeStore{entries: []*audit.Entry{a, c}}
+		w := NewWriter(fs, priv)
+		_, err := w.LoadHead(context.Background(), pub)
+		if !errors.Is(err, audit.ErrBrokenChain) {
+			t.Fatalf("err = %v, want ErrBrokenChain", err)
+		}
+	})
+
+	t.Run("equal_timestamps_skip_link_comparison", func(t *testing.T) {
+		a := mk("A", nil, t0)
+		b := mk("B", a.Hash, t0)
+		// Two appends inside one millisecond tie on the sort key, so Latest
+		// and Penultimate can come back in either order. The link comparison
+		// must stand down in both or LoadHead refuses startup on a healthy
+		// ledger. The child-as-head order is the one that catches a gutted
+		// tie branch: verifying the child against nil reports a broken chain.
+		for _, entries := range [][]*audit.Entry{{a, b}, {b, a}} {
+			fs := &fakeStore{entries: entries}
+			w := NewWriter(fs, priv)
+			head, err := w.LoadHead(context.Background(), pub)
+			if err != nil {
+				t.Fatalf("LoadHead with head %s: %v", entries[1].Action, err)
+			}
+			if head.Action != entries[1].Action {
+				t.Errorf("Action = %q, want %q", head.Action, entries[1].Action)
+			}
 		}
 	})
 
