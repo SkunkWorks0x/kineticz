@@ -199,7 +199,12 @@ func (e *Engine) Diagnose(ctx context.Context, q elastic.ContractQuery, syncStar
 			attribute.String("kineticz.correlation_token", string(token)),
 		)
 		ch, err := e.dynatrace.QueryConsumerHealth(cctx, syncStartMs, syncEndMs)
-		if err != nil {
+		var de *dynatrace.DynatraceError
+		// Soft-fail set mirrors the parent classification at engine.go:253;
+		// keep in sync.
+		if errors.Is(err, dynatrace.ErrTelemetryUnavailable) || errors.As(err, &de) {
+			cspan.SetAttributes(attribute.Bool("tool.degraded", true))
+		} else if err != nil {
 			cspan.SetStatus(codes.Error, err.Error())
 			cspan.RecordError(err)
 		}

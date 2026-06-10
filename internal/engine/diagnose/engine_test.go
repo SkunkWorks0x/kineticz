@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
@@ -559,4 +560,85 @@ func TestDiagnose_PhoenixSpanCarriesQueryAndOutcome(t *testing.T) {
 	if attrs["kineticz.phoenix_spans_scanned"] != "2" {
 		t.Errorf("phoenix_spans_scanned = %q, want 2 (truncation must be observable)", attrs["kineticz.phoenix_spans_scanned"])
 	}
+}
+
+func TestDiagnose_DynatraceSoftFailSpanIsDegradedNotErrored(t *testing.T) {
+	cases := []struct {
+		name         string
+		dtErr        error
+		wantError    bool
+		wantDegraded bool
+	}{
+		{
+			name:         "telemetry_unavailable_marks_degraded_not_error",
+			dtErr:        dynatrace.ErrTelemetryUnavailable,
+			wantDegraded: true,
+		},
+		{
+			name:         "http_404_marks_degraded_not_error",
+			dtErr:        &dynatrace.DynatraceError{StatusCode: 404, Body: "404 page not found"},
+			wantDegraded: true,
+		},
+		{
+			name:      "correlation_missing_still_marks_error",
+			dtErr:     dynatrace.ErrCorrelationMissing,
+			wantError: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := tracetest.NewSpanRecorder()
+			prev := otel.GetTracerProvider()
+			otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)))
+			t.Cleanup(func() { otel.SetTracerProvider(prev) })
+
+			es := &elastic.Mock{LookupContractFn: func(context.Context, elastic.ContractQuery) (*elastic.ContractContext, error) {
+				return &elastic.ContractContext{YAMLDefinition: "name: users_v1\n"}, nil
+			}}
+			dt := &dynatrace.Mock{QueryConsumerHealthFn: func(context.Context, int64, int64) ([]dynatrace.ConsumerHealth, error) {
+				return nil, tc.dtErr
+			}}
+			e := &Engine{elastic: es, dynatrace: dt, audit: &recordingAudit{}, timeout: 2 * time.Second}
+
+			_, _ = e.Diagnose(corr.WithToken(context.Background(), "tok-dt-span"),
+				elastic.ContractQuery{ContractName: "users_v1"}, 0, 1000)
+
+			span := waitForSpan(t, rec, "dynatrace.query_consumer_health")
+			if got := span.Status().Code == codes.Error; got != tc.wantError {
+				t.Errorf("span error status = %v, want %v (status %+v)", got, tc.wantError, span.Status())
+			}
+			if got := boolAttr(span, "tool.degraded"); got != tc.wantDegraded {
+				t.Errorf("tool.degraded = %v, want %v", got, tc.wantDegraded)
+			}
+		})
+	}
+}
+
+// waitForSpan returns the ended span with the given name. The Dynatrace leg
+// sends its result to the parent before its deferred span End runs, and the
+// parent does not join the goroutine, so the End can land after Diagnose
+// returns. Bound the wait rather than race it.
+func waitForSpan(t *testing.T, rec *tracetest.SpanRecorder, name string) sdktrace.ReadOnlySpan {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		for _, s := range rec.Ended() {
+			if s.Name() == name {
+				return s
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("span %q never ended", name)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func boolAttr(s sdktrace.ReadOnlySpan, key string) bool {
+	for _, kv := range s.Attributes() {
+		if string(kv.Key) == key {
+			return kv.Value.AsBool()
+		}
+	}
+	return false
 }
