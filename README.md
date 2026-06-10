@@ -23,7 +23,7 @@ flowchart LR
     R -->|approved diff| EV[evaluate.Gate]
     EV -->|ParsesAsGo + PreservesSignature| EV
     EV -->|PASS| C[commit.Coordinator]
-    EV -->|BLOCK| FAIL[rejected: audited + indexed]
+    EV -->|BLOCK| FAIL[rejected: audited]
     C -->|file + MR| GL[GitLab]
     GL -.->|MR URL| C
     C -->|PIPELINE_COMPLETE| MG
