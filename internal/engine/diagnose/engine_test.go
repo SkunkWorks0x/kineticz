@@ -3,9 +3,14 @@ package diagnose
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/skunkworks0x/kineticz/internal/corr"
 	"github.com/skunkworks0x/kineticz/internal/dynatrace"
@@ -357,8 +362,10 @@ func TestDiagnose_PhoenixPriorRepairs(t *testing.T) {
 		&elastic.ContractContext{YAMLDefinition: "name: orders\n"},
 		[]dynatrace.ConsumerHealth{{Consumer: "svc", ErrorRate: 0.01, LatencyP95Ms: 100}},
 	)
+	var gotQ phoenix.SpanQuery
 	pmock := &phoenix.Mock{
 		QuerySpansFn: func(_ context.Context, q phoenix.SpanQuery) ([]phoenix.Span, error) {
+			gotQ = q
 			return []phoenix.Span{
 				{Name: "kineticz.repair", StartTime: "2026-06-06T10:00:00Z", Attributes: map[string]any{
 					"kineticz.contract_name": "salesforce/orders", "kineticz.final_verdict": "MAX_ITERATIONS", "kineticz.iteration_count": 4}},
@@ -393,6 +400,17 @@ func TestDiagnose_PhoenixPriorRepairs(t *testing.T) {
 	}
 	if !aw.has("DIAGNOSIS_OK") {
 		t.Errorf("audits = %v, want DIAGNOSIS_OK", aw.snapshot())
+	}
+	if len(gotQ.Names) != 1 || gotQ.Names[0] != "kineticz.repair" {
+		t.Errorf("query names = %v, want [kineticz.repair]", gotQ.Names)
+	}
+	if gotQ.Limit != 50 || !gotQ.IncludeAnnotations {
+		t.Errorf("query limit=%d include_annotations=%v, want 50/true", gotQ.Limit, gotQ.IncludeAnnotations)
+	}
+	if parsed, perr := time.Parse(time.RFC3339, gotQ.StartTime); perr != nil {
+		t.Errorf("query start_time %q is not RFC3339: %v", gotQ.StartTime, perr)
+	} else if age := time.Since(parsed); age < 6*24*time.Hour || age > 8*24*time.Hour {
+		t.Errorf("query start_time %q is %v old, want the 7-day lookback", gotQ.StartTime, age)
 	}
 }
 
@@ -429,5 +447,116 @@ func TestDiagnose_PhoenixDegradesSoftly(t *testing.T) {
 	}
 	if !aw.has("DIAGNOSIS_OK") {
 		t.Errorf("audits = %v, want DIAGNOSIS_OK (apply path unaffected)", aw.snapshot())
+	}
+}
+
+func TestDiagnose_PhoenixOverrunCannotStallDiagnose(t *testing.T) {
+	es, dt := okMocks(
+		&elastic.ContractContext{YAMLDefinition: "name: orders\n"},
+		[]dynatrace.ConsumerHealth{{Consumer: "svc", ErrorRate: 0.01, LatencyP95Ms: 100}},
+	)
+	release := make(chan struct{})
+	pmock := &phoenix.Mock{
+		QuerySpansFn: func(context.Context, phoenix.SpanQuery) ([]phoenix.Span, error) {
+			// Models the MCP SDK stalling in session teardown: the call ignores
+			// its context and returns long after the leg's budget expired.
+			<-release
+			return nil, nil
+		},
+	}
+	aw := &recordingAudit{}
+	e := &Engine{
+		elastic: es, dynatrace: dt, audit: aw, timeout: 2 * time.Second,
+		phoenix: pmock, phoenixProject: "default", phoenixTimeout: 50 * time.Millisecond,
+	}
+
+	type out struct {
+		res *DiagnosisResult
+		err error
+	}
+	done := make(chan out, 1)
+	go func() {
+		res, derr := e.Diagnose(corr.WithToken(context.Background(), "tok-overrun"),
+			elastic.ContractQuery{ContractName: "salesforce/orders"}, 0, 1000)
+		done <- out{res, derr}
+	}()
+
+	var got out
+	select {
+	case got = <-done:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("Diagnose blocked on the stalled Phoenix call; the leg budget must bound the wait")
+	}
+	close(release)
+
+	if got.err != nil {
+		t.Fatalf("unexpected err: %v", got.err)
+	}
+	if len(got.res.PriorRepairs) != 0 {
+		t.Errorf("PriorRepairs = %+v, want empty when the leg misses its budget", got.res.PriorRepairs)
+	}
+	if !aw.has("PHOENIX_HISTORY_DEGRADED") {
+		t.Errorf("audits = %v, want PHOENIX_HISTORY_DEGRADED", aw.snapshot())
+	}
+}
+
+func TestDiagnose_PhoenixSpanCarriesQueryAndOutcome(t *testing.T) {
+	rec := tracetest.NewSpanRecorder()
+	prev := otel.GetTracerProvider()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)))
+	t.Cleanup(func() { otel.SetTracerProvider(prev) })
+
+	es, dt := okMocks(
+		&elastic.ContractContext{YAMLDefinition: "name: orders\n"},
+		[]dynatrace.ConsumerHealth{{Consumer: "svc", ErrorRate: 0.01, LatencyP95Ms: 100}},
+	)
+	pmock := &phoenix.Mock{
+		QuerySpansFn: func(context.Context, phoenix.SpanQuery) ([]phoenix.Span, error) {
+			return []phoenix.Span{
+				{Name: "kineticz.repair", StartTime: "2026-06-06T10:00:00Z", Attributes: map[string]any{
+					"kineticz.contract_name": "salesforce/orders", "kineticz.final_verdict": "MAX_ITERATIONS", "kineticz.iteration_count": 4}},
+				{Name: "kineticz.repair", StartTime: "2026-06-05T09:00:00Z", Attributes: map[string]any{
+					"kineticz.contract_name": "postgres/users", "kineticz.final_verdict": "APPROVED", "kineticz.iteration_count": 1}},
+			}, nil
+		},
+	}
+	e := &Engine{
+		elastic: es, dynatrace: dt, audit: &recordingAudit{}, timeout: 2 * time.Second,
+		phoenix: pmock, phoenixProject: "default", phoenixTimeout: time.Second,
+	}
+
+	_, err := e.Diagnose(corr.WithToken(context.Background(), "tok-span"),
+		elastic.ContractQuery{ContractName: "salesforce/orders"}, 0, 1000)
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+
+	var attrs map[string]string
+	for _, s := range rec.Ended() {
+		if s.Name() == "phoenix.query_prior_repairs" {
+			attrs = map[string]string{}
+			for _, kv := range s.Attributes() {
+				attrs[string(kv.Key)] = kv.Value.Emit()
+			}
+		}
+	}
+	if attrs == nil {
+		t.Fatal("phoenix.query_prior_repairs span not recorded")
+	}
+	if attrs["kineticz.contract_name"] != "salesforce/orders" {
+		t.Errorf("contract_name = %q; a judge cannot tie the introspection to its contract", attrs["kineticz.contract_name"])
+	}
+	if attrs["kineticz.correlation_token"] != "tok-span" {
+		t.Errorf("correlation_token = %q, want tok-span", attrs["kineticz.correlation_token"])
+	}
+	if !strings.Contains(attrs["input.value"], "kineticz.repair") {
+		t.Errorf("input.value = %q, want the get-spans arguments", attrs["input.value"])
+	}
+	if !strings.Contains(attrs["output.value"], "MAX_ITERATIONS") {
+		t.Errorf("output.value = %q, want the matched priors", attrs["output.value"])
+	}
+	if attrs["kineticz.phoenix_spans_scanned"] != "2" {
+		t.Errorf("phoenix_spans_scanned = %q, want 2 (truncation must be observable)", attrs["kineticz.phoenix_spans_scanned"])
 	}
 }

@@ -281,18 +281,31 @@ func (e *Engine) Diagnose(ctx context.Context, q elastic.ContractQuery, syncStar
 }
 
 // launchPhoenix starts the self-introspection leg, or returns nil when Phoenix
-// is disabled. The goroutine owns its context's cancel so the bounded budget is
-// released as soon as the query finishes.
+// is disabled. The watcher publishes on ch within the leg budget even when the
+// query ignores its context (the MCP SDK can stall in session teardown). A
+// stalled query that returns late drops its result into the buffered inner
+// channel and the goroutine exits; a call that never returns leaks its
+// goroutine, which the budget cannot reclaim. The "timeout" mode separates a
+// budget overrun from a Phoenix error in the trace.
 func (e *Engine) launchPhoenix(ctx context.Context, contract string) <-chan phoenixResult {
 	if e.phoenix == nil {
 		return nil
 	}
 	ch := make(chan phoenixResult, 1)
 	pctx, pcancel := context.WithTimeout(ctx, e.phoenixTimeout)
+	inner := make(chan phoenixResult, 1)
+	go func() {
+		priors, mode := e.queryPriorRepairs(pctx, contract)
+		inner <- phoenixResult{priors: priors, mode: mode}
+	}()
 	go func() {
 		defer pcancel()
-		priors, mode := e.queryPriorRepairs(pctx, contract)
-		ch <- phoenixResult{priors: priors, mode: mode}
+		select {
+		case r := <-inner:
+			ch <- r
+		case <-pctx.Done():
+			ch <- phoenixResult{mode: "timeout"}
+		}
 	}()
 	return ch
 }
@@ -301,19 +314,25 @@ func (e *Engine) launchPhoenix(ctx context.Context, contract string) <-chan phoe
 // never returns an error: on any failure it reports the empty_optional mode and
 // no priors, mirroring the Elastic mitigations fallback.
 func (e *Engine) queryPriorRepairs(ctx context.Context, contract string) ([]PriorRepair, string) {
+	token, _ := corr.FromContext(ctx)
 	ctx, span := arize.Tracer().Start(ctx, "phoenix.query_prior_repairs")
 	defer span.End()
-	span.SetAttributes(
-		attribute.String("openinference.span.kind", "TOOL"),
-		attribute.String("tool.name", "phoenix.get_spans"),
-	)
-	spans, err := e.phoenix.QuerySpans(ctx, phoenix.SpanQuery{
+	q := phoenix.SpanQuery{
 		Project:            e.phoenixProject,
 		Names:              []string{"kineticz.repair"},
 		StartTime:          time.Now().Add(-priorRepairLookback).UTC().Format(time.RFC3339),
 		IncludeAnnotations: true,
 		Limit:              50,
-	})
+	}
+	in, _ := json.Marshal(q.Args())
+	span.SetAttributes(
+		attribute.String("openinference.span.kind", "TOOL"),
+		attribute.String("tool.name", "phoenix.get_spans"),
+		attribute.String("kineticz.contract_name", contract),
+		attribute.String("kineticz.correlation_token", string(token)),
+		attribute.String("input.value", string(in)),
+	)
+	spans, err := e.phoenix.QuerySpans(ctx, q)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		span.RecordError(err)
@@ -321,9 +340,12 @@ func (e *Engine) queryPriorRepairs(ctx context.Context, contract string) ([]Prio
 		return nil, "empty_optional"
 	}
 	priors := summarizePriorRepairs(spans, contract)
+	out, _ := json.Marshal(priors)
 	span.SetAttributes(
 		attribute.String("retrieval.mode", "phoenix_history"),
 		attribute.Int("kineticz.phoenix_prior_count", len(priors)),
+		attribute.Int("kineticz.phoenix_spans_scanned", len(spans)),
+		attribute.String("output.value", string(out)),
 	)
 	return priors, "phoenix_history"
 }
