@@ -124,6 +124,114 @@ func TestQuerySpans_BadJSONIsStructured(t *testing.T) {
 	}
 }
 
+func TestQuerySpans_ToolErrorDoesNotRedial(t *testing.T) {
+	// A tool-level failure is deterministic: tearing down the session and
+	// re-running the identical call cannot recover and doubles subprocess cost.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	h := func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: "project not found"}}}, nil
+	}
+	dials := 0
+	dial := func(dctx context.Context) (*mcp.ClientSession, error) {
+		dials++
+		cs, _ := fakeSession(t, dctx, h)
+		return cs, nil
+	}
+	c := New(dial, "kineticz")
+	defer c.Close()
+
+	_, err := c.QuerySpans(ctx, SpanQuery{Project: "missing"})
+	var pe *PhoenixError
+	if !errors.As(err, &pe) || pe.Op != "tool" {
+		t.Fatalf("err = %v, want *PhoenixError{Op: tool}", err)
+	}
+	if dials != 1 {
+		t.Errorf("dial attempts = %d, want 1 (no redial on a deterministic tool error)", dials)
+	}
+}
+
+func TestQuerySpans_ExpiredContextDoesNotRedial(t *testing.T) {
+	// Once the leg budget is gone, a second dial spawns a doomed subprocess.
+	dials := 0
+	dial := func(dctx context.Context) (*mcp.ClientSession, error) {
+		dials++
+		return nil, dctx.Err()
+	}
+	c := New(dial, "kineticz")
+	defer c.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.QuerySpans(ctx, SpanQuery{Project: "kineticz"}); err == nil {
+		t.Fatal("want error from expired context")
+	}
+	if dials != 1 {
+		t.Errorf("dial attempts = %d, want 1 (no redial after the budget expired)", dials)
+	}
+}
+
+func TestQuerySpans_UnknownToolDoesNotRedial(t *testing.T) {
+	// A JSON-RPC protocol rejection (a phoenix-mcp upgrade renames get-spans
+	// or tightens its schema) is deterministic; a redial tears down a healthy
+	// session and spawns a second subprocess to repeat it.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	dials := 0
+	dial := func(dctx context.Context) (*mcp.ClientSession, error) {
+		dials++
+		srv := mcp.NewServer(&mcp.Implementation{Name: "fake-phoenix", Version: "0.0.1"}, nil)
+		srv.AddTool(&mcp.Tool{Name: "other-tool", InputSchema: map[string]any{"type": "object"}}, textResult("{}"))
+		ct, st := mcp.NewInMemoryTransports()
+		if _, err := srv.Connect(dctx, st, nil); err != nil {
+			t.Fatalf("server connect: %v", err)
+		}
+		cl := mcp.NewClient(&mcp.Implementation{Name: "kineticz-test", Version: "0.0.1"}, nil)
+		cs, err := cl.Connect(dctx, ct, nil)
+		if err != nil {
+			t.Fatalf("client connect: %v", err)
+		}
+		return cs, nil
+	}
+	c := New(dial, "kineticz")
+	defer c.Close()
+
+	_, err := c.QuerySpans(ctx, SpanQuery{Project: "kineticz"})
+	var pe *PhoenixError
+	if !errors.As(err, &pe) || pe.Op != "call" {
+		t.Fatalf("err = %v, want *PhoenixError{Op: call}", err)
+	}
+	if dials != 1 {
+		t.Errorf("dial attempts = %d, want 1 (no redial on a protocol rejection)", dials)
+	}
+}
+
+func TestQuerySpans_MidCallExpiryDoesNotRedial(t *testing.T) {
+	// The budget can expire while the call is in flight. The failure surfaces
+	// as Op "call", and a redial would spawn a doomed subprocess.
+	h := func(hctx context.Context, _ *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		<-hctx.Done()
+		return nil, hctx.Err()
+	}
+	dials := 0
+	dial := func(dctx context.Context) (*mcp.ClientSession, error) {
+		dials++
+		cs, _ := fakeSession(t, dctx, h)
+		return cs, nil
+	}
+	c := New(dial, "kineticz")
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := c.QuerySpans(ctx, SpanQuery{Project: "kineticz"}); err == nil {
+		t.Fatal("want error from mid-call expiry")
+	}
+	if dials != 1 {
+		t.Errorf("dial attempts = %d, want 1 (no redial after the budget expired in flight)", dials)
+	}
+}
+
 // staticDialer returns the same session every dial. The reconnect test uses its
 // own counting dialer instead.
 func staticDialer(cs *mcp.ClientSession) Dialer {

@@ -7,11 +7,13 @@ package phoenix
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"sync"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -78,7 +80,17 @@ func (c *stdioClient) QuerySpans(ctx context.Context, q SpanQuery) ([]Span, erro
 	if err == nil {
 		return spans, nil
 	}
-	// Reconnect once: the long-lived node session may have died between calls.
+	// Reconnect once, and only when the transport failed: the long-lived node
+	// session may have died between calls. Tool, parse, and JSON-RPC protocol
+	// failures (unknown tool, schema-invalid arguments) are deterministic, so
+	// a redial repeats the same failure at double the subprocess cost. A
+	// failed dial already had a fresh subprocess, and an expired context dooms
+	// the second dial before it starts.
+	var pe *PhoenixError
+	var je *jsonrpc.Error
+	if !errors.As(err, &pe) || pe.Op != "call" || errors.As(err, &je) || ctx.Err() != nil {
+		return nil, err
+	}
 	c.reset()
 	return c.callOnce(ctx, q)
 }
@@ -88,7 +100,7 @@ func (c *stdioClient) callOnce(ctx context.Context, q SpanQuery) ([]Span, error)
 	if err != nil {
 		return nil, &PhoenixError{Op: "connect", Err: err}
 	}
-	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "get-spans", Arguments: q.toArgs()})
+	res, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "get-spans", Arguments: q.Args()})
 	if err != nil {
 		return nil, &PhoenixError{Op: "call", Err: err}
 	}
@@ -126,7 +138,9 @@ func (c *stdioClient) Close() error {
 	return nil
 }
 
-func (q SpanQuery) toArgs() map[string]any {
+// Args returns the get-spans tool arguments for this query. The diagnose stage
+// stamps the same map on its introspection span as input.value.
+func (q SpanQuery) Args() map[string]any {
 	args := map[string]any{"project_identifier": q.Project}
 	if len(q.Names) > 0 {
 		args["names"] = q.Names
