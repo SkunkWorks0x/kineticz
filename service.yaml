@@ -11,7 +11,7 @@ spec:
         autoscaling.knative.dev/maxScale: "10"
         run.googleapis.com/execution-environment: gen2
         run.googleapis.com/cpu-throttling: "false"
-        kineticz.dev/deploy-ts: "2026-06-02T16-48"
+        kineticz.dev/deploy-ts: "2026-06-10T22-18"
     spec:
       timeoutSeconds: 300
       containerConcurrency: 80
@@ -63,11 +63,13 @@ spec:
                   key: latest
             # PHOENIX_HOST is the Phoenix app URL with the space path, distinct
             # from the OTLP collector endpoint above (no /v1/traces). The MCP
-            # self-introspection leg spawns phoenix-mcp against it. Replace
-            # your-space before deploy. Unset/placeholder leaves the leg degraded
-            # and the apply path unchanged.
+            # self-introspection leg spawns phoenix-mcp against it. Unset/empty
+            # leaves the leg degraded and the apply path unchanged.
             - name: PHOENIX_HOST
-              value: https://app.phoenix.arize.com/s/your-space
+              valueFrom:
+                secretKeyRef:
+                  name: PHOENIX_HOST
+                  key: latest
             # Phoenix project the diagnose leg queries for prior repair spans.
             # Must match the project Kineticz's OTLP traces land in.
             - name: PHOENIX_PROJECT
