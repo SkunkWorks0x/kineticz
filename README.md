@@ -53,7 +53,7 @@ the full pipeline end-to-end; it is gated behind the `integration` build tag.
 
 **Repair.** `repair.Coordinator` runs up to 4 iterations. Each iteration refreshes the target file buffer, prompts Gemini 3.5 Flash with contract + target + mitigations + prior repair outcomes (when Phoenix returned any) + previous feedback, parses the response with `bluekeyes/go-gitdiff`, and rejects on multi-file, binary, empty hunks, path traversal, or two consecutive empty responses.
 
-**Evaluate.** `evaluate.Gate` runs the local pre-filter first: patched bytes must parse as Go (`go/parser`) and exported function signatures must remain unchanged (`go/ast`). Local BLOCK skips downstream stages entirely. On local pass, Phoenix records the verdict as a trace span for observability. Rejected diffs are deduplicated by SHA-256 and indexed into Elastic in a detached goroutine.
+**Evaluate.** `evaluate.Gate` runs the local pre-filter first: patched bytes must parse as Go (`go/parser`) and exported function signatures must remain unchanged (`go/ast`). Local BLOCK skips downstream stages. On local pass, Phoenix records the verdict as a trace span for observability. Rejected diffs are deduplicated by SHA-256 and handed to the rejected-diff indexer in a detached goroutine; the indexer is a no-op and the elastic package exposes no Index method, so the rejected-diff poisoning loop is inert.
 
 **Commit.** `commit.Coordinator` pushes the post-patch file content to a GitLab branch named `kineticz/<correlation_token>`, then opens a merge request. The MR description prepends `X-Correlation-Token: <token>` so the audit ledger joins to the MR thread. Audit emits `COMMIT_OK` and `MR_CREATED` as distinct entries so the ledger pinpoints which half failed if one does.
 
