@@ -95,6 +95,13 @@ contract, a failure (`MAX_ITERATIONS`, 4 iterations) and a success (`APPROVED`,
 leg degrades and the diagnosis proceeds. This is the partner MCP integration:
 Kineticz introspects its own trace history through Arize Phoenix.
 
+The Dockerfile bakes the phoenix-mcp server (`@arizeai/phoenix-mcp`, pinned)
+into the container image. The Go binary spawns it as a node subprocess inside
+the same container and speaks MCP over stdio, so a request to the hosted Cloud
+Run URL exercises the full MCP path with no sidecar or separate service.
+Without Phoenix the diagnose stage writes `PHOENIX_HISTORY_DEGRADED` to the
+audit ledger and the run still returns `PIPELINE_COMPLETE`.
+
 ## Partner integrations
 
 | Partner | Role | Integration | Live status |
@@ -102,13 +109,13 @@ Kineticz introspects its own trace history through Arize Phoenix.
 | Fivetran | Schema-change source | HMAC-verified inbound webhook | live |
 | Gemini 3.5 Flash | Patch generation | Vertex AI `generateContent` REST, metadata-server auth | live |
 | Elastic | Contract and mitigation retrieval | BM25 over the connector signature | live (BM25 only) |
-| Dynatrace | Downstream consumer health | DQL over REST | soft-fail demo, no live tenant |
+| Dynatrace | Soft-fail downstream-consumer-health source | DQL over REST | soft-fail demo, no live tenant |
 | Arize Phoenix | Observability and self-introspection | OpenTelemetry spans, Phoenix MCP for prior-repair queries | live |
 | GitLab | Patch application | v4 REST: branch commit and merge request | live |
 | MongoDB Atlas | Tamper-evident audit ledger | hash-chained, Ed25519-signed, ACID writes | live |
 
-The partner MCP integration is Arize Phoenix MCP. Dynatrace and Elastic are called
-over REST, not MCP.
+Arize Phoenix is the observability and tracing spine and the partner-track
+integration. Kineticz calls Dynatrace and Elastic over REST, not MCP.
 
 ## Audit chain
 
