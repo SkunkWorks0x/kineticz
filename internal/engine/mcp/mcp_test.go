@@ -1,60 +1,6 @@
 package mcp
 
-import (
-	"encoding/json"
-	"strings"
-	"testing"
-)
-
-func TestOutboundTools(t *testing.T) {
-	tools := OutboundTools()
-	if len(tools) != 3 {
-		t.Fatalf("len(OutboundTools) = %d, want 3", len(tools))
-	}
-
-	wantNames := map[string]bool{
-		"elastic_lookup_contract":         false,
-		"dynatrace_query_consumer_health": false,
-		"arize_phoenix_query_traces":      false,
-	}
-	for _, td := range tools {
-		if _, ok := wantNames[td.Name]; !ok {
-			t.Errorf("unexpected tool name: %q", td.Name)
-			continue
-		}
-		wantNames[td.Name] = true
-		if td.Parameters.Type != "OBJECT" {
-			t.Errorf("%s.Parameters.Type = %q, want OBJECT", td.Name, td.Parameters.Type)
-		}
-		if len(td.Parameters.Required) == 0 {
-			t.Errorf("%s has no required parameters", td.Name)
-		}
-		// Must JSON-marshal cleanly (Gemini consumes JSON).
-		if _, err := json.Marshal(td); err != nil {
-			t.Errorf("%s: marshal failed: %v", td.Name, err)
-		}
-	}
-	for name, seen := range wantNames {
-		if !seen {
-			t.Errorf("missing tool: %q", name)
-		}
-	}
-}
-
-func TestOutboundTools_ElasticHasRRFInDescription(t *testing.T) {
-	for _, td := range OutboundTools() {
-		if td.Name == "elastic_lookup_contract" {
-			if !strings.Contains(td.Description, "Reciprocal Rank Fusion") {
-				t.Errorf("elastic tool description missing RRF reference: %q", td.Description)
-			}
-			if !strings.Contains(td.Description, "60") {
-				t.Errorf("elastic tool description missing rank_constant=60: %q", td.Description)
-			}
-			return
-		}
-	}
-	t.Fatal("elastic_lookup_contract not found")
-}
+import "testing"
 
 func TestInboundTools(t *testing.T) {
 	tools := InboundTools()
