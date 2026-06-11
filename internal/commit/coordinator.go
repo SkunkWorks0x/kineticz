@@ -119,11 +119,67 @@ func ApplyDiff(orig, diff []byte) ([]byte, error) {
 	if len(files) != 1 {
 		return nil, fmt.Errorf("commit: expected exactly 1 file in diff, got %d", len(files))
 	}
+	if err := reanchorFragments(files[0], orig); err != nil {
+		return nil, fmt.Errorf("commit: re-anchor diff: %w", err)
+	}
 	var out bytes.Buffer
 	if err := gitdiff.Apply(&out, bytes.NewReader(orig), files[0]); err != nil {
 		return nil, fmt.Errorf("commit: apply diff: %w", err)
 	}
 	return out.Bytes(), nil
+}
+
+// reanchorFragments pins each fragment to the line where its old-side content
+// (context and deletion lines) occurs in orig, overriding the model's unreliable
+// @@ line numbers. The content is byte-correct but the line numbers drift, so the
+// strict applier rejects every hunk. Re-anchoring corrects the start; it fails
+// closed when a hunk matches zero positions, more than one, or has no old-side
+// content to anchor on, so a wrong patch never lands.
+func reanchorFragments(f *gitdiff.File, orig []byte) error {
+	var prevStart int64
+	for i, frag := range f.TextFragments {
+		var block []byte
+		for _, ln := range frag.Lines {
+			if ln.Old() {
+				block = append(block, ln.Line...)
+			}
+		}
+		if len(block) == 0 {
+			return fmt.Errorf("hunk %d: empty old-side block, no context to anchor", i)
+		}
+		starts := lineMatches(orig, block)
+		if len(starts) != 1 {
+			return fmt.Errorf("hunk %d: old-side block matched %d positions, want exactly 1", i, len(starts))
+		}
+		if starts[0] <= prevStart {
+			return fmt.Errorf("hunk %d: re-anchored start %d not after previous hunk start %d", i, starts[0], prevStart)
+		}
+		frag.OldPosition = starts[0]
+		prevStart = starts[0]
+	}
+	return nil
+}
+
+// lineMatches returns the 1-based line numbers where block begins at a line
+// boundary in orig and matches byte-exactly. block is a run of whole source lines
+// (each carrying its newline), so a boundary-anchored byte match is an exact line
+// match.
+func lineMatches(orig, block []byte) []int64 {
+	var out []int64
+	off := 0
+	lineNo := int64(1)
+	for off+len(block) <= len(orig) {
+		if bytes.Equal(orig[off:off+len(block)], block) {
+			out = append(out, lineNo)
+		}
+		nl := bytes.IndexByte(orig[off:], '\n')
+		if nl < 0 {
+			break
+		}
+		off += nl + 1
+		lineNo++
+	}
+	return out
 }
 
 func branchName(token corr.CorrelationToken) string {

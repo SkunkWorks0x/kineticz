@@ -323,7 +323,7 @@ func TestRepair_ApplyConflictRetries(t *testing.T) {
 	if res.Iterations != 2 {
 		t.Errorf("Iterations = %d, want 2", res.Iterations)
 	}
-	if len(prompts) < 2 || !strings.Contains(prompts[1], "fragment line does not match src line") {
+	if len(prompts) < 2 || !strings.Contains(prompts[1], "previous diff failed to apply:") {
 		t.Errorf("iteration-2 prompt missing apply-conflict feedback; prompts = %q", prompts)
 	}
 	want := []string{"REPAIR_ATTEMPT", "REPAIR_REJECTED", "REPAIR_ATTEMPT", "REPAIR_APPROVED"}
@@ -465,21 +465,15 @@ func TestBuildPrompt_StatesGateRule(t *testing.T) {
 	}
 }
 
-// A residual line-number offset (correct content, wrong header position) that
-// anchoring does not catch conflicts under position-strict apply and recovers
-// via the loop's feedback retry.
-func TestRepair_RecoversFromLineNumberOffset(t *testing.T) {
+// Re-anchoring corrects a line-number offset (correct content, wrong @@ position)
+// to its exact context match, so the diff applies on the first iteration with no
+// retry.
+func TestRepair_ReanchorsLineNumberOffset(t *testing.T) {
 	src := loadFixture(t, "users.go.src")
 	offset := string(loadFixture(t, "wrong_position.diff"))
-	clean := string(loadFixture(t, "valid_single_file.diff"))
-	var call int
 	gm := &gemini.Mock{
 		GenerateFn: func(_ context.Context, _ gemini.GenerateRequest) (*gemini.Response, error) {
-			call++
-			if call == 1 {
-				return responseWithDiff("offset headers", offset), nil
-			}
-			return responseWithDiff("corrected", clean), nil
+			return responseWithDiff("offset headers", offset), nil
 		},
 	}
 	aw := &recordingAudit{}
@@ -488,10 +482,10 @@ func TestRepair_RecoversFromLineNumberOffset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Repair: %v", err)
 	}
-	if res.Iterations != 2 {
-		t.Errorf("Iterations = %d, want 2", res.Iterations)
+	if res.Iterations != 1 {
+		t.Errorf("Iterations = %d, want 1", res.Iterations)
 	}
-	want := []string{"REPAIR_ATTEMPT", "REPAIR_REJECTED", "REPAIR_ATTEMPT", "REPAIR_APPROVED"}
+	want := []string{"REPAIR_ATTEMPT", "REPAIR_APPROVED"}
 	if got := aw.actions(); !sameSlice(got, want) {
 		t.Errorf("audit actions = %v, want %v", got, want)
 	}
