@@ -24,9 +24,9 @@ merge request, and records every step in a tamper-evident audit ledger.
    in the target file.
 4. **Gate.** A local syntactic evaluator decides pass or fail. The patched bytes
    must parse as Go (`go/parser`) and exported function signatures must stay
-   unchanged (`go/ast`). The gate proves compilation and signature stability. It
-   does not prove behavioral correctness. Phoenix records the verdict as a span;
-   it observes the decision and does not make it.
+   unchanged (`go/ast`). It runs no build or test. It does not prove behavioral
+   correctness. Phoenix records the verdict as a span; it observes the decision
+   and does not make it.
 5. **Apply.** The patch lands as a GitLab merge request after passing the local
    gate. A human reviews the MR for semantics before merge.
 6. **Audit.** MongoDB Atlas stores each transition, hash-chained and

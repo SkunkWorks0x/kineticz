@@ -65,12 +65,11 @@ numbers are not trusted. The coordinator re-anchors each hunk to its unique exac
 context match in the target file, or rejects the diff fail-closed on a zero,
 non-unique, or unanchorable match. The applier is byte-exact.
 
-**Evaluate.** `evaluate.Gate` runs locally. The patched bytes must parse as Go
-(`go/parser`) and exported function signatures must stay unchanged (`go/ast`). The
-gate is syntactic. It proves the patch compiles and preserves exported signatures.
-It does not prove behavioral correctness. The human who reviews the merge request
-provides the semantic check. Phoenix records the verdict as a trace span. Rejected
-diffs are audited.
+**Evaluate.** `evaluate.Gate` runs locally and checks two properties: the patched
+file parses as valid Go (`go/parser`), and exported function signatures stay
+unchanged (`go/ast`). It runs no build, test, or typecheck. The human who reviews
+the merge request provides the semantic check. Phoenix records the verdict as a
+trace span. Rejected diffs are audited.
 
 **Commit.** `commit.Coordinator` pushes the patched file to a GitLab branch named
 `kineticz/<correlation_token>`, then opens a merge request. The description
@@ -134,8 +133,9 @@ roundtrip. See `internal/audit/audit.go` and `internal/audit/mongodb/`.
 
 Stated plainly, because they shape what every claim above means:
 
-- The gate is syntactic. It checks that the patch compiles and keeps exported
-  signatures stable. It does not check behavior. The MR reviewer does.
+- The gate checks that the patched file parses as Go and keeps exported
+  signatures stable. It runs no build, test, or typecheck. The MR reviewer
+  checks behavior.
 - Retrieval is BM25 in the deployed environment. The dense vector leg (KNN over
   diff embeddings via reciprocal rank fusion) is wired but inactive without a
   provisioned Elastic ML node.
