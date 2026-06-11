@@ -79,6 +79,32 @@ func TestHealthHandler(t *testing.T) {
 	}
 }
 
+func TestRootHandler(t *testing.T) {
+	t.Run("root_returns_ok", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		rec := httptest.NewRecorder()
+		rootHandler(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		var body map[string]string
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body["status"] != "ok" {
+			t.Errorf("status field = %q, want ok", body["status"])
+		}
+	})
+	t.Run("unknown_path_404s", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/nope", nil)
+		rec := httptest.NewRecorder()
+		rootHandler(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("status = %d, want 404", rec.Code)
+		}
+	})
+}
+
 func TestGetenvFallback(t *testing.T) {
 	t.Setenv("KINETICZ_TEST_SET", "actual")
 	if got := getenv("KINETICZ_TEST_SET", "fallback"); got != "actual" {

@@ -183,10 +183,24 @@ func WireHandler(d Deps) http.Handler {
 	rec := fivetran.NewReceiver(d.EventStore, d.FivetranSecret, pipeline, d.TraceFlush)
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/", rootHandler)
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/audit/pubkey", pubkeyHandler(d.PublicKey))
 	mux.Handle("/webhooks/fivetran", rec)
 	return mux
+}
+
+// rootHandler answers the bare service URL so an uptime check on "/" is green.
+// ServeMux routes every otherwise-unmatched path to "/", so guard on the exact
+// path to keep unknown routes returning 404.
+func rootHandler(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
 func healthHandler(w http.ResponseWriter, _ *http.Request) {
