@@ -20,7 +20,7 @@ writes go to MongoDB, not Elastic.
 
 | Field | Type | Read by |
 |---|---|---|
-| `name` | keyword | — |
+| `name` | keyword | none |
 | `yaml` | text | `_source.yaml` → `ContractContext.YAMLDefinition` (client.go:125-137) |
 
 `mitigations` (index_elastic.sh:104-113):
@@ -37,7 +37,7 @@ writes go to MongoDB, not Elastic.
 (index_elastic.sh:105). There is **no rejection/status field** in the mapping;
 `parseMitigationHits` decodes only `summary` + `diff_id` (client.go:216-241).
 
-## Embeddings — Elastic-side, no Go vectors
+## Embeddings: Elastic-side, no Go vectors
 
 The Go binary sends text only and never computes a vector (client.go:144).
 
@@ -62,10 +62,10 @@ ML node the KNN/inference leg returns HTTP 429 and the client degrades to BM25.
 2. It propagates `searchMitigationsRRF` → `retrieveMitigations` (client.go:249) →
    `classifyVectorError` (client.go:253).
 3. `classifyVectorError` (client.go:263-284) sets:
-   - status from `ee.StatusCode` — **client.go:266**
+   - status from `ee.StatusCode`, **client.go:266**
    - reason `no_ml_nodes` when the body contains "no ml node" / "no suitable
-     nodes" — **client.go:269-270**
-   - reason `429` when status is 429 without that text — **client.go:273-274**
+     nodes", **client.go:269-270**
+   - reason `429` when status is 429 without that text, **client.go:273-274**
 4. The client then retries BM25-only and returns `mode = bm25_fallback`
    (client.go:254-256); `recordLookup` audits `ELASTIC_LOOKUP_DEGRADED` with
    `vector_status` + `vector_reason` (client.go:297-311).
@@ -91,7 +91,7 @@ The `signature` is the connector signature `ConnectorType/ConnectorName`
 
 ## Valid sample mitigation doc (demo: orders_pg)
 
-Normal path — index text only; the default pipeline computes `diff_embedding`:
+Normal path: index text only; the default pipeline computes `diff_embedding`:
 
 ```json
 { "index": { "_id": "diff-001" } }
@@ -117,7 +117,7 @@ This mitigation (`diff-001`) matches the demo schema drift: the `orders_pg`
   No write method exists on the client.
 - **Rejected-diff write path:** `evaluate.RejectedIndexer.Index(ctx, sha, diff)`
   (gate.go:21-23), invoked at gate.go:88, wired in cmd/kineticz/main.go:425 to
-  `noopIndexer{}` — drops the diff on the floor (main.go:493-498).
+  `noopIndexer{}`, which drops the diff on the floor (main.go:493-498).
 
 The two paths are separate, and the rejected-diff indexer is still the no-op.
 The `mitigations` mapping has no rejection field, so if a real indexer replaces
@@ -126,7 +126,7 @@ query first.
 
 # Provisioning runbook (Imani)
 
-## 1. Auth — already wired
+## 1. Auth: already wired
 
 The client authenticates with an Elastic API key: header
 `Authorization: ApiKey <encoded>` (client.go:336). The value is the base64
@@ -146,7 +146,7 @@ and `ELASTIC_API_KEY` (service.yaml:69-73) are wired as Secret Manager
 `secretKeyRef`s (`key: latest`). The API-key secret is bound today (commit
 `fd008ef`); the "only the URL is wired" assumption is stale, and secret names are
 UPPER_SNAKE, not `kineticz-elastic-url`. Action: ensure the Secret Manager secrets
-`ELASTIC_URL` and `ELASTIC_API_KEY` hold real `latest` versions — no service.yaml
+`ELASTIC_URL` and `ELASTIC_API_KEY` hold real `latest` versions. No service.yaml
 edit needed. `ELASTIC_INFERENCE_MODEL` is not wired, so the runtime uses the
 default endpoint; add it to service.yaml only if you provision a custom endpoint id.
 
@@ -162,7 +162,7 @@ The script cannot create ML capacity. By hand in the deployment first:
     capacity exists; otherwise deploy the `.multilingual-e5-small` trained model in
     Kibana (ML → Trained Models) with **1 allocation, 1 thread**.
   - Custom endpoint id: the script creates it via `PUT _inference` with
-    `num_allocations:1, num_threads:1` (index_elastic.sh:64-68) — still needs an ML node.
+    `num_allocations:1, num_threads:1` (index_elastic.sh:64-68). It still needs an ML node.
 
 No ML node yet? Run the script `--bm25-only` for a lexical-only demo (step 4).
 
@@ -184,7 +184,7 @@ export ELASTIC_API_KEY="<base64 encoded from POST /_security/api_key>"
 # optional, only for a custom endpoint id:
 # export ELASTIC_INFERENCE_MODEL="my-e5-endpoint"
 
-./scripts/index_elastic.sh              # full E5 path — ML node required
+./scripts/index_elastic.sh              # full E5 path, ML node required
 ./scripts/index_elastic.sh --bm25-only  # OR lexical-only, no ML node
 ```
 
@@ -196,7 +196,7 @@ and bulk index; the script's curl uses `--fail-with-body` and aborts on the firs
 
 ## 5. Verify the KNN leg (no `no_ml_nodes` 429)
 
-Inference probe — confirms the model is allocated on an ML node:
+The inference probe confirms the model is allocated on an ML node:
 
 ```sh
 curl -sS -H "Authorization: ApiKey $ELASTIC_API_KEY" -H 'Content-Type: application/json' \
@@ -206,7 +206,7 @@ curl -sS -H "Authorization: ApiKey $ELASTIC_API_KEY" -H 'Content-Type: applicati
 
 200 with a 384-float `text_embedding` = ML node up. `429` / "no ml node" = capacity missing.
 
-End-to-end — the client's exact RRF query (client.go:145-178):
+End-to-end: the client's exact RRF query (client.go:145-178):
 
 ```sh
 curl -sS -H "Authorization: ApiKey $ELASTIC_API_KEY" -H 'Content-Type: application/json' \
